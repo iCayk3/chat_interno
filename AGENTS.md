@@ -114,3 +114,31 @@ cd server
 go run cmd/server/main.go
 go test ./...
 ```
+
+---
+
+## 🔒 7. Regras Mandatórias de Segurança (Invioláveis desde o Início)
+
+Qualquer agente ou desenvolvedor atuando neste repositório **DEVE PREVENIR E NUNCA PERMITIR** as seguintes 10 falhas de segurança e más práticas:
+
+1. **Formulário sem validação no servidor:**
+   - *Diretriz:* Nunca confiar exclusivamente na validação do frontend. Toda entrada (REST ou WebSocket) deve ser estritamente validada no backend em Go (tipos, tamanhos máximos, regex e campos obrigatórios).
+2. **Rotas protegidas apenas no frontend:**
+   - *Diretriz:* O frontend apenas oculta elementos de interface; o backend em Go deve validar autenticação (tokens/JWT) e autorização em **todos** os endpoints e no handshake do WebSocket.
+3. **Chaves e secrets expostos no código:**
+   - *Diretriz:* Proibido *hardcode* de chaves de API, senhas de banco de dados e secrets JWT. Usar exclusivamente variáveis de ambiente (`.env`), devidamente ignoradas no `.gitignore`.
+4. **Falta de validação de autorização por usuário (Anti-IDOR):**
+   - *Diretriz:* O backend deve validar se o remetente realmente tem permissão para acessar ou enviar mensagens na conversa informada, impedindo que um cliente leia dados de outro.
+5. **Endpoints sem limite de requisições (Rate Limiting):**
+   - *Diretriz:* Implementar limitador de requisições (rate limit) por IP e por usuário em rotas críticas e de autenticação, prevenindo força bruta e DoS.
+6. **Upload de arquivos sem validação:**
+   - *Diretriz:* Qualquer upload futuro de mídias/documentos no chat deve validar tamanho máximo, MIME type real (magic numbers) e extensão permitida, armazenando com nomes aleatórios (UUID).
+7. **Dados sensíveis expostos nas respostas da API:**
+   - *Diretriz:* Structs em Go e DTOs de resposta nunca devem expor campos como senhas, hashes, dados fiscais desnecessários ou tokens internos. Utilizar tags `json:"-"` nas structs.
+8. **Proteção insuficiente contra XSS:**
+   - *Diretriz:* Sanitizar e escapar todo conteúdo gerado por usuários antes da renderização no Painel Web e no Mobile para mitigar injeção de scripts maliciosos.
+9. **Configuração de CORS aberta demais:**
+   - *Diretriz:* Nunca liberar `Access-Control-Allow-Origin: *` em rotas privadas. Restringir explicitamente aos domínios autorizados do app mobile e do painel web.
+10. **Mensagens de erro revelando informações internas:**
+    - *Diretriz:* Nunca expor stack traces, erros internos de driver SQL ou detalhes de infraestrutura para o cliente. Erros detalhados vão apenas para os logs internos do servidor; o cliente recebe mensagens amigáveis e padronizadas.
+

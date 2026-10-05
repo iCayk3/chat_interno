@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Conversation, ConversationStatus } from '../types/chat';
-import { Headphones, Search, Clock, CheckCircle2, MessageSquare, AlertCircle } from 'lucide-react';
+import type { UserRole, AuthUser } from '../types/crm';
+import { Search, Clock, CheckCircle2, MessageSquare, AlertCircle, RotateCcw } from 'lucide-react';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -11,6 +12,9 @@ interface SidebarProps {
   searchTerm: string;
   onSearchChange: (val: string) => void;
   isConnected: boolean;
+  onResetAll?: () => void;
+  userRole?: UserRole;
+  currentUser?: AuthUser | null;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -22,6 +26,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   searchTerm,
   onSearchChange,
   isConnected,
+  onResetAll,
+  userRole,
+  currentUser,
 }) => {
   const waitingCount = conversations.filter(c => c.status === 'waiting').length;
   const activeCount = conversations.filter(c => c.status === 'active').length;
@@ -42,24 +49,48 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
+  const displayName = currentUser?.name || 'Atendente SOL';
+  const displayInitials = displayName
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(p => p[0].toUpperCase())
+    .join('') || 'AT';
+
   return (
     <aside className="w-80 h-full bg-white border-r border-slate-200 flex flex-col shrink-0 select-none">
       {/* Top Operator Header */}
       <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50/50">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-sm shadow-blue-500/20">
-            <Headphones className="w-5 h-5" />
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-sm shadow-blue-500/20 font-bold text-xs shrink-0">
+            {displayInitials}
           </div>
-          <div>
-            <div className="font-semibold text-slate-800 text-sm flex items-center gap-2">
-              <span>Marcos Suporte</span>
-              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 ring-2 ring-emerald-100' : 'bg-rose-500 ring-2 ring-rose-100'}`} />
+          <div className="min-w-0">
+            <div className="font-semibold text-slate-800 text-sm flex items-center gap-2 truncate">
+              <span className="truncate">{displayName}</span>
+              <span className={`w-2 h-2 rounded-full shrink-0 ${isConnected ? 'bg-emerald-500 ring-2 ring-emerald-100' : 'bg-rose-500 ring-2 ring-rose-100'}`} />
             </div>
-            <div className="text-xs text-slate-500">
-              {isConnected ? 'Operador Online' : 'Desconectado'}
+            <div className="text-xs text-slate-500 truncate">
+              {isConnected
+                ? (currentUser?.role || userRole) === 'operador'
+                  ? `Operador (${currentUser?.department || 'Meus Atendimentos'})`
+                  : (currentUser?.role || userRole) === 'gestor'
+                  ? `Gestor (${currentUser?.department || 'Visão da Equipe'})`
+                  : 'Administrador (Acesso Total)'
+                : 'Desconectado'}
             </div>
           </div>
         </div>
+
+        {onResetAll && userRole !== 'operador' && (
+          <button
+            onClick={onResetAll}
+            title="Limpar histórico e resetar todos os atendimentos do zero (Admin/Gestor)"
+            className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       {/* Search Input */}

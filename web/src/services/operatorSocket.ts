@@ -9,8 +9,8 @@ class OperatorSocketService {
   private socket: WebSocket | null = null;
   private isConnected = false;
   private currentConversationId = '';
-  private operatorId = 'op-01';
-  private operatorName = 'Marcos Suporte';
+  private operatorId = 'op-admin';
+  private operatorName = 'Atendente SOL';
 
   private messageListeners: MessageListener[] = [];
   private typingListeners: TypingListener[] = [];
@@ -19,13 +19,34 @@ class OperatorSocketService {
   private reconnectTimer: any = null;
   private outboxQueue: string[] = [];
 
+  constructor() {
+    this.loadStoredOperator();
+  }
+
+  private loadStoredOperator() {
+    try {
+      const stored = localStorage.getItem('solcrm_auth_user');
+      if (stored) {
+        const u = JSON.parse(stored);
+        if (u.id) this.operatorId = u.id;
+        if (u.name) this.operatorName = u.name;
+      }
+    } catch {}
+  }
+
   public setOperator(id: string, name: string) {
-    this.operatorId = id;
-    this.operatorName = name;
+    const changed = (this.operatorId !== id || this.operatorName !== name) && Boolean(id) && Boolean(name);
+    if (id) this.operatorId = id;
+    if (name) this.operatorName = name;
+    if (changed && this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
+      this.disconnect();
+      this.connect(this.currentConversationId);
+    }
   }
 
   public connect(conversationId = '') {
     this.currentConversationId = conversationId;
+    this.loadStoredOperator();
 
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
       if (conversationId && this.socket.readyState === WebSocket.OPEN) {
@@ -65,13 +86,17 @@ class OperatorSocketService {
 
       this.socket.onmessage = (event) => {
         try {
-          const action: WSAction = JSON.parse(event.data);
-          this.notifyAction(action);
+          const raw = typeof event.data === 'string' ? event.data : '';
+          const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+          for (const line of lines) {
+            const action: WSAction = JSON.parse(line);
+            this.notifyAction(action);
 
-          if (action.type === 'message' && action.payload) {
-            this.notifyMessage(action.payload);
-          } else if (action.type === 'typing' && action.payload) {
-            this.notifyTyping(action.payload);
+            if (action.type === 'message' && action.payload) {
+              this.notifyMessage(action.payload);
+            } else if (action.type === 'typing' && action.payload) {
+              this.notifyTyping(action.payload);
+            }
           }
         } catch (e) {
           console.warn('[OPERATOR WS] Mensagem inválida recebida:', e);
@@ -114,17 +139,26 @@ class OperatorSocketService {
     }
   }
 
-  public sendMessage(conversationId: string, content: string) {
-    const payload: Message = {
-      id: 'op-msg-' + Date.now(),
-      conversationId,
-      senderId: this.operatorId,
-      senderType: 'operator',
-      senderName: this.operatorName,
-      content,
-      timestamp: new Date().toISOString(),
-      status: 'delivered',
-    };
+  public sendMessage(conversationIdOrMsg: string | Message, content?: string) {
+    let payload: Message;
+    if (typeof conversationIdOrMsg === 'object') {
+      payload = {
+        ...conversationIdOrMsg,
+        senderId: conversationIdOrMsg.senderId || this.operatorId,
+        senderName: conversationIdOrMsg.senderName || this.operatorName,
+      };
+    } else {
+      payload = {
+        id: 'op-msg-' + Date.now(),
+        conversationId: conversationIdOrMsg,
+        senderId: this.operatorId,
+        senderType: 'operator',
+        senderName: this.operatorName,
+        content: content || '',
+        timestamp: new Date().toISOString(),
+        status: 'delivered',
+      };
+    }
 
     const raw = JSON.stringify({
       type: 'send_message',

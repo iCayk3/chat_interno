@@ -1,25 +1,45 @@
+import Constants from 'expo-constants';
 import { Message } from '../types/chat';
 
 type MessageHandler = (message: Message) => void;
 type StatusHandler = (connected: boolean) => void;
 type TypingHandler = (isTyping: boolean, senderName: string) => void;
+type ChatClosedHandler = (reason: string) => void;
+
+function getWebSocketUrl(): string {
+  // 1. Se estiver rodando no navegador (Web)
+  if (typeof window !== 'undefined' && window.location && window.location.hostname) {
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      return 'ws://localhost:8080/ws';
+    }
+    return `ws://${window.location.hostname}:8080/ws`;
+  }
+
+  // 2. Se estiver rodando no celular via Expo Go, extrai o IP de onde o bundle foi baixado
+  const hostUri = Constants.expoConfig?.hostUri || (Constants as any).manifest2?.extra?.expoClient?.hostUri;
+  if (hostUri) {
+    const ip = hostUri.split(':')[0];
+    if (ip && ip !== 'localhost') {
+      return `ws://${ip}:8080/ws`;
+    }
+  }
+
+  // 3. Fallback para o IP ativo da máquina na rede SOL-PROVEDOR_5G
+  return 'ws://10.12.199.3:8080/ws';
+}
 
 class ChatSocketService {
   private socket: WebSocket | null = null;
-  private serverUrl: string = 'ws://10.0.2.2:8080/ws'; // Default Go server url (or local network IP)
   private isConnected: boolean = false;
   private messageListeners: MessageHandler[] = [];
   private statusListeners: StatusHandler[] = [];
   private typingListeners: TypingHandler[] = [];
+  private chatClosedListeners: ChatClosedHandler[] = [];
   private reconnectTimer: any = null;
-  private mockMode: boolean = true; // Enabled when server is unreachable so the app remains fully testable
+  private outboxQueue: string[] = []; // Fila de envio garantido para mensagens nunca se perderem
 
-  public setServerUrl(url: string) {
-    this.serverUrl = url;
-  }
-
-  public enableMockMode(enabled: boolean) {
-    this.mockMode = enabled;
+  public getConnected(): boolean {
+    return this.isConnected;
   }
 
   public connect(conversationId: string, clientId: string, clientName: string) {
@@ -28,26 +48,39 @@ class ChatSocketService {
     }
 
     try {
-      const url = `${this.serverUrl}?conversationId=${conversationId}&clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`;
+      const baseUrl = getWebSocketUrl();
+      const url = `${baseUrl}?conversationId=${conversationId}&clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`;
+      console.log('[MOBILE WS] Conectando a:', url);
       this.socket = new WebSocket(url);
 
       this.socket.onopen = () => {
         this.isConnected = true;
-        this.mockMode = false;
         this.notifyStatus(true);
-        console.log('Connected to Chat WebSocket');
+        console.log('[MOBILE WS] Conectado ao servidor Go com sucesso!');
+
+        // Despeja mensagens pendentes da fila instantaneamente
+        while (this.outboxQueue.length > 0) {
+          const item = this.outboxQueue.shift();
+          if (item) {
+            console.log('[MOBILE WS] Enviando mensagem da fila pendente...');
+            this.socket?.send(item);
+          }
+        }
       };
 
       this.socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === 'message') {
+          if (data.type === 'message' && data.payload) {
             this.notifyMessage(data.payload);
-          } else if (data.type === 'typing') {
+          } else if (data.type === 'typing' && data.payload) {
             this.notifyTyping(data.payload.isTyping, data.payload.senderName || 'Operador');
+          } else if (data.type === 'chat_closed') {
+            const reason = data.payload?.reason || 'Atendimento encerrado pelo operador';
+            this.notifyChatClosed(reason);
           }
         } catch (e) {
-          console.warn('Failed to parse WebSocket message', e);
+          console.warn('[MOBILE WS] Falha ao processar mensagem do servidor', e);
         }
       };
 
@@ -57,60 +90,39 @@ class ChatSocketService {
         this.scheduleReconnect(conversationId, clientId, clientName);
       };
 
-      this.socket.onerror = () => {
+      this.socket.onerror = (e) => {
+        console.warn('[MOBILE WS] Erro na conexão do WebSocket:', e);
         this.isConnected = false;
         this.notifyStatus(false);
-        // Fallback to simulated offline/mock mode for seamless UI testing
-        this.mockMode = true;
       };
-    } catch {
+    } catch (e) {
+      console.warn('[MOBILE WS] Falha ao iniciar WebSocket:', e);
       this.isConnected = false;
-      this.mockMode = true;
       this.notifyStatus(false);
+      this.scheduleReconnect(conversationId, clientId, clientName);
     }
   }
 
   private scheduleReconnect(conversationId: string, clientId: string, clientName: string) {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
-      console.log('Attempting to reconnect...');
+      console.log('[MOBILE WS] Tentando reconectar ao Go Server...');
       this.connect(conversationId, clientId, clientName);
-    }, 5000);
+    }, 4000);
   }
 
   public sendMessage(message: Message) {
+    const raw = JSON.stringify({
+      type: 'send_message',
+      payload: message,
+    });
+
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({
-        type: 'send_message',
-        payload: message,
-      }));
-    } else if (this.mockMode) {
-      // Simulate operator response in mock mode for preview/testing
-      this.simulateOperatorResponse(message);
+      this.socket.send(raw);
+    } else {
+      console.log('[MOBILE WS] Socket ainda conectando. Enfileirando mensagem para envio imediato...');
+      this.outboxQueue.push(raw);
     }
-  }
-
-  private simulateOperatorResponse(clientMsg: Message) {
-    // Notify typing after 1s
-    setTimeout(() => {
-      this.notifyTyping(true, 'Operador Suporte');
-    }, 800);
-
-    // Send operator mock reply after 2.5s
-    setTimeout(() => {
-      this.notifyTyping(false, 'Operador Suporte');
-      const reply: Message = {
-        id: 'mock-' + Date.now(),
-        conversationId: clientMsg.conversationId,
-        senderId: 'op-01',
-        senderType: 'operator',
-        senderName: 'Atendimento SOL',
-        content: `Olá, ${clientMsg.senderName}! Recebi sua mensagem: "${clientMsg.content}". Como posso te ajudar hoje?`,
-        timestamp: new Date().toISOString(),
-        status: 'delivered',
-      };
-      this.notifyMessage(reply);
-    }, 2400);
   }
 
   public sendTyping(conversationId: string, clientId: string, isTyping: boolean) {
@@ -144,6 +156,13 @@ class ChatSocketService {
     };
   }
 
+  public onChatClosed(handler: ChatClosedHandler) {
+    this.chatClosedListeners.push(handler);
+    return () => {
+      this.chatClosedListeners = this.chatClosedListeners.filter((h) => h !== handler);
+    };
+  }
+
   private notifyMessage(msg: Message) {
     this.messageListeners.forEach((h) => h(msg));
   }
@@ -156,6 +175,10 @@ class ChatSocketService {
     this.typingListeners.forEach((h) => h(isTyping, senderName));
   }
 
+  private notifyChatClosed(reason: string) {
+    this.chatClosedListeners.forEach((h) => h(reason));
+  }
+
   public disconnect() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.socket) {
@@ -163,6 +186,7 @@ class ChatSocketService {
       this.socket = null;
     }
     this.isConnected = false;
+    this.outboxQueue = [];
   }
 }
 

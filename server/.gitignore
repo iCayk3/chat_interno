@@ -1,0 +1,17 @@
+# Binários compilados
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Variáveis de ambiente sensíveis (Regra 3 de Segurança)
+.env
+.env.local
+.env.*.local
+
+# Logs e arquivos de teste
+*.log
+*.out

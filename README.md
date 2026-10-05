@@ -1,44 +1,69 @@
 # 🚀 Chat Interno - Sistema de Atendimento Omnichannel
 
-Sistema de mensageria em tempo real conectando **Clientes (Mobile)** e **Operadores de Atendimento (Web)**, alimentado por um backend de alta performance em **Go (Golang)**.
+Sistema completo de mensageria em tempo real conectando **Clientes (App Mobile)** e **Operadores de Suporte (Painel Web)** através de um servidor de alta concorrência em **Go (Golang)**.
 
 ---
 
-## 📁 Estrutura do Projeto
+## 📁 Estrutura do Ecossistema
 
 ```text
 Chat-Interno/
-├── mobile/      # Aplicativo React Native (Expo) com TypeScript - App do Cliente
-├── server/      # Backend em Go (Golang) com WebSockets e REST APIs (Próxima etapa)
-└── web/         # Painel do Operador em React + Vite + Tailwind (Próxima etapa)
+├── AGENTS.md        # Diretrizes e regras mandatórias de segurança para agentes de IA
+├── README.md        # Guia mestre de execução e arquitetura
+├── mobile/          # App Mobile do Cliente (Expo SDK 52+ / React Native + TypeScript)
+├── server/          # Backend em Go (Golang 1.27) com WebSockets, Hub/Client e Chi Router
+└── web/             # Painel Web do Operador (React + Vite + TypeScript + Tailwind CSS)
 ```
 
 ---
 
-## 📱 Como rodar o App Mobile
+## 🚀 Como Executar o Teste Completo (Ponta a Ponta)
 
-### 1. Pré-requisitos
-- Aplicativo **Expo Go** instalado no seu celular ([Google Play](https://play.google.com/store/apps/details?id=host.exp.exponent) ou [App Store](https://apps.apple.com/app/expo-go/id982107442)).
+Para realizar um teste integrado completo, abra 3 terminais:
 
-### 2. Iniciar o servidor de desenvolvimento
-No terminal, entre na pasta `mobile` e execute:
+### 1️⃣ Terminal 1: Servidor Central em Go
+Inicia a API e o Hub WebSocket de alta concorrência:
+
+```bash
+cd server
+go run cmd/server/main.go
+```
+* **WebSocket:** `ws://localhost:8080/ws` (e na rede local `ws://192.168.1.2:8080/ws`)
+* **Health Check:** `http://localhost:8080/api/health`
+
+---
+
+### 2️⃣ Terminal 2: Painel Web do Operador (Atendente)
+Inicia o dashboard do operador com fila de espera e histórico:
+
+```bash
+cd web
+npm run dev
+```
+* Acesse no navegador: **`http://localhost:5173`**
+* O painel se conectará imediatamente ao servidor Go exibindo o status **Operador Online**.
+
+---
+
+### 3️⃣ Terminal 3: App Mobile (Cliente)
+Inicia o aplicativo para os clientes iniciarem atendimento:
 
 ```bash
 cd mobile
 npx expo start
 ```
-
-### 3. Abrir no aparelho
-- No terminal será exibido um **QR Code**.
-- Abra o aplicativo **Expo Go** no seu celular e escaneie o código.
-- O aplicativo compilará e abrirá instantaneamente na tela do seu celular!
+* Escaneie o **QR Code** no aplicativo **Expo Go** do seu celular (ou aperte `a` para emulador Android / `w` para navegador).
+* Informe seu nome, departamento e clique em **Iniciar Atendimento**.
 
 ---
 
-## 💡 Recursos do App Mobile Já Implementados
+## 🔄 Fluxo de Teste Prático
 
-- ✅ **Identificação do Cliente:** Tela inicial com nome, CPF/e-mail para consulta e seleção de departamento (Suporte, Dúvidas, Comercial).
-- ✅ **Persistência de Sessão:** Armazena dados localmente via `AsyncStorage` permitindo retomar atendimentos em andamento.
-- ✅ **Chat em Tempo Real:** Interface de mensagens com balões estilizados, data/hora e confirmações de envio (✓, ✓✓).
-- ✅ **Indicador de Digitação:** Notificação visual em tempo real quando o operador está digitando.
-- ✅ **Simulador Offline Inteligente (Mock Mode):** Permite testar o fluxo de envio e resposta mesmo enquanto o servidor Go ainda não estiver rodando!
+1. **Cliente entra na fila:** No celular (Mobile), informe um nome (ex: "Carlos Cliente") e inicie o atendimento.
+2. **Operador recebe notificação:** No navegador (`http://localhost:5173`), a aba **Fila** atualizará automaticamente com a nova solicitação.
+3. **Assumir atendimento:** Clique na conversa e no botão **Assumir Atendimento**. O status mudará para *Em Atendimento*.
+4. **Mensageria Bidirecional em Tempo Real:** 
+   - Envie mensagens no celular e veja-as aparecer instantaneamente na tela do operador.
+   - Responda pelo painel web (ou use as *Respostas Rápidas*) e veja as mensagens chegarem no celular com confirmação de entrega.
+   - Digite no teclado de um dos lados para ver o indicador *"Digitando..."* em tempo real no outro!
+5. **Consulta a APIs Externas:** No painel web do operador, clique no botão **Consultar** no painel direito para testar a integração concorrente de CRM/ERP do Go.

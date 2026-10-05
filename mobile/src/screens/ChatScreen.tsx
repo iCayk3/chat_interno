@@ -107,19 +107,75 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
       setIsKeyboardVisible(false);
     });
 
+    const unsubClosed = chatSocket.onChatClosed((reason) => {
+      const closedSession: ConversationSession = {
+        ...session,
+        status: 'closed',
+      };
+      setSession(closedSession);
+      storage.saveCurrentSession(closedSession);
+
+      const sysMsg: Message = {
+        id: 'sys-closed-' + Date.now(),
+        conversationId: session.id,
+        senderId: 'system',
+        senderType: 'system',
+        senderName: 'Sistema',
+        content: `Atendimento encerrado (${reason}). Para falar com a equipe novamente, basta enviar uma nova mensagem abaixo.`,
+        timestamp: new Date().toISOString(),
+        status: 'delivered',
+      };
+      setMessages((prev) => [...prev, sysMsg]);
+    });
+
     return () => {
       unsubMsg();
       unsubStatus();
       unsubTyping();
+      unsubClosed();
       showSub.remove();
       hideSub.remove();
     };
   }, [session.id]);
 
   const handleSendMessage = (text: string) => {
+    let currentConvId = session.id;
+
+    // Se o atendimento anterior estiver fechado, cria um NOVO chamado automaticamente (estilo WhatsApp)
+    if (session.status === 'closed') {
+      const newConvId = 'conv-' + Date.now();
+      currentConvId = newConvId;
+
+      const newSession: ConversationSession = {
+        id: newConvId,
+        clientId: client.id,
+        clientName: client.name,
+        status: 'waiting',
+        createdAt: new Date().toISOString(),
+      };
+      setSession(newSession);
+      storage.saveCurrentSession(newSession);
+
+      // Reconecta o socket para a nova sala
+      chatSocket.disconnect();
+      chatSocket.connect(newConvId, client.id, client.name);
+
+      const sysRestartMsg: Message = {
+        id: 'sys-start-' + Date.now(),
+        conversationId: newConvId,
+        senderId: 'system',
+        senderType: 'system',
+        senderName: 'Sistema',
+        content: 'Novo chamado aberto. Um operador irá lhe atender em instantes.',
+        timestamp: new Date().toISOString(),
+        status: 'delivered',
+      };
+      setMessages((prev) => [...prev, sysRestartMsg]);
+    }
+
     const newMsg: Message = {
       id: 'msg-' + Date.now(),
-      conversationId: session.id,
+      conversationId: currentConvId,
       senderId: client.id,
       senderType: 'client',
       senderName: client.name,
@@ -139,16 +195,37 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
   const handleFinishChat = () => {
     Alert.alert(
       'Encerrar Atendimento',
-      'Deseja realmente finalizar esta conversa?',
+      'Deseja realmente finalizar este atendimento?',
       [
-        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Voltar', style: 'cancel' },
         {
           text: 'Encerrar',
           style: 'destructive',
           onPress: async () => {
-            await storage.clearSession();
-            chatSocket.disconnect();
-            navigation.goBack();
+            const closedSession: ConversationSession = {
+              ...session,
+              status: 'closed',
+            };
+            setSession(closedSession);
+            await storage.saveCurrentSession(closedSession);
+
+            // Avisa o servidor via REST se possível
+            try {
+              const host = chatSocket.getConnected() ? '10.12.199.3' : 'localhost';
+              await fetch(`http://${host}:8080/api/conversations/${session.id}/close`, { method: 'POST' });
+            } catch {}
+
+            const sysCloseMsg: Message = {
+              id: 'sys-closed-' + Date.now(),
+              conversationId: session.id,
+              senderId: 'system',
+              senderType: 'system',
+              senderName: 'Sistema',
+              content: 'Você encerrou este atendimento. Suas mensagens permanecem salvas como histórico.',
+              timestamp: new Date().toISOString(),
+              status: 'delivered',
+            };
+            setMessages((prev) => [...prev, sysCloseMsg]);
           },
         },
       ]
@@ -181,7 +258,7 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
             <View
               style={[
                 styles.statusDot,
-                session.status === 'active' ? styles.statusOnline : styles.statusWaiting,
+                isConnected ? (session.status === 'active' ? styles.statusOnline : styles.statusWaiting) : styles.statusOffline,
               ]}
             />
           </View>
@@ -191,7 +268,11 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
               {session.operator ? session.operator.name : 'Suporte SOL'}
             </Text>
             <Text style={styles.operatorStatus}>
-              {session.status === 'active' ? 'Atendimento em andamento' : 'Aguardando operador...'}
+              {!isConnected
+                ? 'Conectando ao servidor Go...'
+                : session.status === 'active'
+                ? 'Atendimento em andamento'
+                : 'Aguardando operador na fila...'}
             </Text>
           </View>
 
@@ -289,6 +370,9 @@ const styles = StyleSheet.create({
   },
   statusWaiting: {
     backgroundColor: colors.warning,
+  },
+  statusOffline: {
+    backgroundColor: colors.danger,
   },
   headerInfo: {
     flex: 1,

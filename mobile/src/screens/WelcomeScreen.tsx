@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import { RootStackParamList, ClientProfile } from '../types/chat';
@@ -33,9 +34,12 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
   const [selectedDept, setSelectedDept] = useState(DEPARTMENTS[0].id);
   const [hasExistingSession, setHasExistingSession] = useState(false);
 
-  useEffect(() => {
-    loadCachedProfile();
-  }, []);
+  // Recarrega sempre que a tela ganha foco (ao voltar do chat)
+  useFocusEffect(
+    useCallback(() => {
+      loadCachedProfile();
+    }, [])
+  );
 
   const loadCachedProfile = async () => {
     const profile = await storage.getClientProfile();
@@ -47,7 +51,22 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
 
     const session = await storage.getCurrentSession();
     if (session && session.status !== 'closed') {
+      try {
+        const host = typeof window !== 'undefined' && window.location?.hostname === 'localhost' ? 'localhost' : '10.12.199.3';
+        const res = await fetch(`http://${host}:8080/api/conversations/${session.id}`);
+        if (res.ok) {
+          const conv = await res.json();
+          if (conv.status === 'closed') {
+            session.status = 'closed';
+            await storage.saveCurrentSession(session);
+            setHasExistingSession(false);
+            return;
+          }
+        }
+      } catch {}
       setHasExistingSession(true);
+    } else {
+      setHasExistingSession(false);
     }
   };
 

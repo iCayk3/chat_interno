@@ -61,27 +61,68 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
     storage.saveCurrentSession(session);
 
     // Connect to WebSocket / real-time service
-    chatSocket.connect(session.id, client.id, client.name);
+    chatSocket.connect(session.id, client.id, client.name, client.department);
 
     const unsubMsg = chatSocket.onMessage((newMsg) => {
+      if (newMsg.conversationId && newMsg.conversationId !== session.id) {
+        return;
+      }
+
+      setIsTyping(false);
       setMessages((prev) => {
         if (prev.some((m) => m.id === newMsg.id)) return prev;
         return [...prev, newMsg];
       });
 
-      if (newMsg.senderType === 'operator' && session.status === 'waiting') {
-        const updatedSession: ConversationSession = {
-          ...session,
-          status: 'active',
-          operator: {
-            id: newMsg.senderId,
-            name: newMsg.senderName,
-          },
-        };
-        setSession(updatedSession);
-        storage.saveCurrentSession(updatedSession);
+      if (newMsg.senderType === 'operator' && newMsg.senderName) {
+        setSession((prev) => {
+          const updatedSession: ConversationSession = {
+            ...prev,
+            status: 'active',
+            operator: {
+              id: newMsg.senderId,
+              name: newMsg.senderName,
+            },
+          };
+          storage.saveCurrentSession(updatedSession);
+          return updatedSession;
+        });
       }
     });
+
+    const unsubAssigned = chatSocket.onOperatorAssigned((operatorId, operatorName) => {
+      setSession((prev) => {
+        const updatedSession: ConversationSession = {
+          ...prev,
+          status: 'active',
+          operator: {
+            id: operatorId,
+            name: operatorName,
+          },
+        };
+        storage.saveCurrentSession(updatedSession);
+        return updatedSession;
+      });
+    });
+
+    // Sincroniza dados do operador com o servidor Go caso a sessão já possua operador atribuído
+    const checkServerSession = async () => {
+      try {
+        const host = typeof window !== 'undefined' && window.location?.hostname === 'localhost' ? 'localhost' : '10.12.199.3';
+        const res = await fetch(`http://${host}:8080/api/conversations/${session.id}`);
+        if (res.ok) {
+          const conv = await res.json();
+          if (conv.operator && conv.operator.name) {
+            setSession((prev) => {
+              const updated: ConversationSession = { ...prev, status: conv.status, operator: conv.operator };
+              storage.saveCurrentSession(updated);
+              return updated;
+            });
+          }
+        }
+      } catch {}
+    };
+    checkServerSession();
 
     const unsubStatus = chatSocket.onStatus((connected) => {
       setIsConnected(connected);
@@ -120,8 +161,8 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
         conversationId: session.id,
         senderId: 'system',
         senderType: 'system',
-        senderName: 'Sistema',
-        content: `Atendimento encerrado (${reason}). Para falar com a equipe novamente, basta enviar uma nova mensagem abaixo.`,
+        senderName: 'Atendimento',
+        content: reason || 'Atendimento encerrado com sucesso! Agradecemos o seu contato. Para falar com a equipe novamente, basta enviar uma nova mensagem abaixo.',
         timestamp: new Date().toISOString(),
         status: 'delivered',
       };
@@ -130,6 +171,7 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
 
     return () => {
       unsubMsg();
+      unsubAssigned();
       unsubStatus();
       unsubTyping();
       unsubClosed();
@@ -158,7 +200,7 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
 
       // Reconecta o socket para a nova sala
       chatSocket.disconnect();
-      chatSocket.connect(newConvId, client.id, client.name);
+      chatSocket.connect(newConvId, client.id, client.name, client.department);
 
       const sysRestartMsg: Message = {
         id: 'sys-start-' + Date.now(),
@@ -271,7 +313,7 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
               {!isConnected
                 ? 'Conectando ao servidor Go...'
                 : session.status === 'active'
-                ? 'Atendimento em andamento'
+                ? (session.operator ? `Atendido por ${session.operator.name}` : 'Atendimento em andamento')
                 : 'Aguardando operador na fila...'}
             </Text>
           </View>

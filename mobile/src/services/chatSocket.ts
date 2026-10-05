@@ -5,6 +5,7 @@ type MessageHandler = (message: Message) => void;
 type StatusHandler = (connected: boolean) => void;
 type TypingHandler = (isTyping: boolean, senderName: string) => void;
 type ChatClosedHandler = (reason: string) => void;
+type OperatorAssignedHandler = (operatorId: string, operatorName: string) => void;
 
 function getWebSocketUrl(): string {
   // 1. Se estiver rodando no navegador (Web)
@@ -35,6 +36,7 @@ class ChatSocketService {
   private statusListeners: StatusHandler[] = [];
   private typingListeners: TypingHandler[] = [];
   private chatClosedListeners: ChatClosedHandler[] = [];
+  private operatorAssignedListeners: OperatorAssignedHandler[] = [];
   private reconnectTimer: any = null;
   private outboxQueue: string[] = []; // Fila de envio garantido para mensagens nunca se perderem
 
@@ -42,14 +44,14 @@ class ChatSocketService {
     return this.isConnected;
   }
 
-  public connect(conversationId: string, clientId: string, clientName: string) {
+  public connect(conversationId: string, clientId: string, clientName: string, department: string = '') {
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
     try {
       const baseUrl = getWebSocketUrl();
-      const url = `${baseUrl}?conversationId=${conversationId}&clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`;
+      const url = `${baseUrl}?conversationId=${conversationId}&clientId=${clientId}&clientName=${encodeURIComponent(clientName)}&department=${encodeURIComponent(department)}`;
       console.log('[MOBILE WS] Conectando a:', url);
       this.socket = new WebSocket(url);
 
@@ -70,14 +72,20 @@ class ChatSocketService {
 
       this.socket.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'message' && data.payload) {
-            this.notifyMessage(data.payload);
-          } else if (data.type === 'typing' && data.payload) {
-            this.notifyTyping(data.payload.isTyping, data.payload.senderName || 'Operador');
-          } else if (data.type === 'chat_closed') {
-            const reason = data.payload?.reason || 'Atendimento encerrado pelo operador';
-            this.notifyChatClosed(reason);
+          const raw = typeof event.data === 'string' ? event.data : '';
+          const lines = raw.split('\n').filter((l: string) => l.trim().length > 0);
+          for (const line of lines) {
+            const data = JSON.parse(line);
+            if (data.type === 'message' && data.payload) {
+              this.notifyMessage(data.payload);
+            } else if (data.type === 'typing' && data.payload) {
+              this.notifyTyping(data.payload.isTyping, data.payload.senderName || 'Operador');
+            } else if (data.type === 'operator_assigned' && data.payload) {
+              this.notifyOperatorAssigned(data.payload.operatorId || '', data.payload.operatorName || 'Operador');
+            } else if (data.type === 'chat_closed') {
+              const reason = data.payload?.reason || 'Atendimento encerrado pelo operador';
+              this.notifyChatClosed(reason);
+            }
           }
         } catch (e) {
           console.warn('[MOBILE WS] Falha ao processar mensagem do servidor', e);
@@ -163,6 +171,13 @@ class ChatSocketService {
     };
   }
 
+  public onOperatorAssigned(handler: OperatorAssignedHandler) {
+    this.operatorAssignedListeners.push(handler);
+    return () => {
+      this.operatorAssignedListeners = this.operatorAssignedListeners.filter((h) => h !== handler);
+    };
+  }
+
   private notifyMessage(msg: Message) {
     this.messageListeners.forEach((h) => h(msg));
   }
@@ -177,6 +192,10 @@ class ChatSocketService {
 
   private notifyChatClosed(reason: string) {
     this.chatClosedListeners.forEach((h) => h(reason));
+  }
+
+  private notifyOperatorAssigned(operatorId: string, operatorName: string) {
+    this.operatorAssignedListeners.forEach((h) => h(operatorId, operatorName));
   }
 
   public disconnect() {

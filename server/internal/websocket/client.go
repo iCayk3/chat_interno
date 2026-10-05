@@ -85,14 +85,44 @@ func (c *Client) handleAction(action *models.WSAction) {
 			return
 		}
 
-		// Valida se a conversa informada bate com a sala do cliente (Anti-IDOR)
-		if c.ConversationID != "" && msg.ConversationID != c.ConversationID {
-			log.Printf("[SECURITY] Tentativa de envio em sala não autorizada: %s por %s", msg.ConversationID, c.SenderID)
+		// Define a sala de destino pretendida
+		targetConvID := msg.ConversationID
+		if targetConvID == "" {
+			targetConvID = c.ConversationID
+		}
+
+		if targetConvID == "" {
+			log.Printf("[WS CLIENT] Mensagem rejeitada: sem conversationId válido de %s", c.SenderName)
 			return
 		}
 
-		// Assegura autoria correta da mensagem
-		msg.ConversationID = c.ConversationID
+		// Validação e sincronização de salas por perfil
+		if c.SenderType == models.SenderOperator {
+			// Operadores podem transitar livremente entre salas de atendimento
+			if c.ConversationID != targetConvID {
+				c.Hub.JoinRoom(c, targetConvID)
+			}
+		} else {
+			// Clientes possuem validação estrita (Anti-IDOR)
+			if c.ConversationID != "" && targetConvID != c.ConversationID {
+				log.Printf("[SECURITY] Tentativa de envio em sala não autorizada: %s por %s", targetConvID, c.SenderID)
+				return
+			}
+			if c.ConversationID == "" {
+				c.Hub.JoinRoom(c, targetConvID)
+			}
+		}
+
+		// Assegura autoria correta e imutável da mensagem
+		msg.ConversationID = targetConvID
+		if c.SenderType == models.SenderOperator {
+			if msg.SenderID != "" {
+				c.SenderID = msg.SenderID
+			}
+			if msg.SenderName != "" {
+				c.SenderName = msg.SenderName
+			}
+		}
 		msg.SenderID = c.SenderID
 		msg.SenderName = c.SenderName
 		msg.SenderType = c.SenderType
@@ -104,18 +134,18 @@ func (c *Client) handleAction(action *models.WSAction) {
 			return
 		}
 
-		// Faz o broadcast para os participantes da sala
-		c.Hub.BroadcastToRoom(c.ConversationID, &models.WSAction{
+		// Faz o broadcast para todos os participantes da sala (cliente + operador atual)
+		c.Hub.BroadcastToRoom(targetConvID, &models.WSAction{
 			Type:    "message",
 			Payload: msg,
 		}, c)
 
-		// Também notifica todos os operadores globais para atualizar a lista lateral
+		// Notifica operadores de OUTRAS salas para atualizar a lista lateral (sem duplicar para quem já está na sala)
 		if c.SenderType == models.SenderClient {
 			c.Hub.BroadcastToOperators(&models.WSAction{
 				Type:    "message",
 				Payload: msg,
-			})
+			}, targetConvID)
 		}
 
 	case "typing":
@@ -129,11 +159,20 @@ func (c *Client) handleAction(action *models.WSAction) {
 			return
 		}
 
-		typing.ConversationID = c.ConversationID
+		targetConvID := typing.ConversationID
+		if targetConvID == "" {
+			targetConvID = c.ConversationID
+		}
+
+		if targetConvID == "" {
+			return
+		}
+
+		typing.ConversationID = targetConvID
 		typing.SenderID = c.SenderID
 		typing.SenderName = c.SenderName
 
-		c.Hub.BroadcastToRoom(c.ConversationID, &models.WSAction{
+		c.Hub.BroadcastToRoom(targetConvID, &models.WSAction{
 			Type:    "typing",
 			Payload: typing,
 		}, c)
@@ -142,7 +181,7 @@ func (c *Client) handleAction(action *models.WSAction) {
 			c.Hub.BroadcastToOperators(&models.WSAction{
 				Type:    "typing",
 				Payload: typing,
-			})
+			}, targetConvID)
 		}
 
 	case "join_room":
@@ -159,7 +198,7 @@ func (c *Client) handleAction(action *models.WSAction) {
 	}
 }
 
-// WritePump escreve mensagens do Hub para a conexão WebSocket
+// WritePump escreve mensagens do Hub para a conexão WebSocket individualmente como frames JSON válidos
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -177,20 +216,8 @@ func (c *Client) WritePump() {
 				return
 			}
 
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			_, _ = w.Write(message)
-
-			// Adiciona mensagens restantes no buffer ao mesmo frame se existirem
-			n := len(c.Send)
-			for i := 0; i < n; i++ {
-				_, _ = w.Write([]byte{'\n'})
-				_, _ = w.Write(<-c.Send)
-			}
-
-			if err := w.Close(); err != nil {
+			// Envia cada mensagem como seu próprio frame de texto WebSocket (evita unir JSONs com \n)
+			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 

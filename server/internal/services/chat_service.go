@@ -292,3 +292,12 @@ func (s *ChatService) GetMessages(convID string, limit int) ([]*models.Message, 
 
 	return result, nil
 }
+
+// ResetAll encerra todas as conversas e limpa completamente todo o histórico e mensagens da memória
+func (s *ChatService) ResetAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.conversations = make(map[string]*models.Conversation)
+	s.messages = make(map[string][]*models.Message)
+}

@@ -15,6 +15,8 @@ type Config struct {
 	AllowedOrigins []string
 	RateLimitRPS   float64
 	RateLimitBurst int
+	JWTSecret      string
+	DatabaseURL    string
 }
 
 func LoadConfig() *Config {
@@ -42,12 +44,17 @@ func LoadConfig() *Config {
 		burst = 60
 	}
 
+	jwtSecret := getEnv("JWT_SECRET", "sol-crm-master-secret-key-2026-production")
+	databaseURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/solcrm?sslmode=disable")
+
 	return &Config{
 		Port:           port,
 		Environment:    env,
 		AllowedOrigins: allowedOrigins,
 		RateLimitRPS:   rps,
 		RateLimitBurst: burst,
+		JWTSecret:      jwtSecret,
+		DatabaseURL:    databaseURL,
 	}
 }
 

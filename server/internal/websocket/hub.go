@@ -114,17 +114,26 @@ func (h *Hub) BroadcastToRoom(conversationID string, action *models.WSAction, se
 	}
 }
 
-// BroadcastToOperators notifica todos os operadores (ex: novo chamado na fila)
-func (h *Hub) BroadcastToOperators(action *models.WSAction) {
+// BroadcastToOperators notifica todos os operadores (ex: novo chamado na fila ou mensagem global),
+// permitindo excluir operadores que já estejam na sala especificada para evitar duplicidade de mensagens
+func (h *Hub) BroadcastToOperators(action *models.WSAction, excludeConversationID ...string) {
 	data, err := json.Marshal(action)
 	if err != nil {
 		return
+	}
+
+	exclude := ""
+	if len(excludeConversationID) > 0 {
+		exclude = excludeConversationID[0]
 	}
 
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	for op := range h.operators {
+		if exclude != "" && op.ConversationID == exclude {
+			continue // Já recebeu pela sala!
+		}
 		select {
 		case op.Send <- data:
 		default:

@@ -2,14 +2,18 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"chat-interno-server/internal/database"
 	"chat-interno-server/internal/models"
 	"chat-interno-server/internal/services"
 	ws "chat-interno-server/internal/websocket"
@@ -18,6 +22,9 @@ import (
 type Handler struct {
 	chatService *services.ChatService
 	extService  *services.ExternalAPIService
+	authService *services.AuthService
+	rbxService  *services.RBXService
+	db          *database.DB
 	hub         *ws.Hub
 	upgrader    websocket.Upgrader
 }
@@ -25,6 +32,9 @@ type Handler struct {
 func NewHandler(
 	chatService *services.ChatService,
 	extService *services.ExternalAPIService,
+	authService *services.AuthService,
+	rbxService *services.RBXService,
+	db *database.DB,
 	hub *ws.Hub,
 	allowedOrigins []string,
 ) *Handler {
@@ -49,6 +59,9 @@ func NewHandler(
 	return &Handler{
 		chatService: chatService,
 		extService:  extService,
+		authService: authService,
+		rbxService:  rbxService,
+		db:          db,
 		hub:         hub,
 		upgrader:    upgrader,
 	}
@@ -78,10 +91,26 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if !h.chatService.ValidateSender(convID, clientID, sType) {
 			_, err := h.chatService.GetConversation(convID)
 			if err != nil && sType == models.SenderClient {
+				dept := r.URL.Query().Get("department")
+				switch strings.ToLower(dept) {
+				case "support":
+					dept = "Suporte Técnico"
+				case "financial":
+					dept = "Financeiro"
+				case "commercial":
+					dept = "Comercial"
+				case "doubts":
+					dept = "Atendimento Geral"
+				}
+				if dept == "" {
+					dept = "Suporte Técnico"
+				}
+
 				// Cria a conversa com o ID exato informado pelo mobile
 				newConv, _ := h.chatService.CreateConversationWithID(convID, models.StartChatRequest{
 					ClientID:   clientID,
 					ClientName: clientName,
+					Department: dept,
 				})
 				// Notifica operadores instantaneamente
 				if newConv != nil {
@@ -123,6 +152,20 @@ func (h *Handler) HandleCreateConversation(w http.ResponseWriter, r *http.Reques
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido"})
 		return
+	}
+
+	switch strings.ToLower(req.Department) {
+	case "support":
+		req.Department = "Suporte Técnico"
+	case "financial":
+		req.Department = "Financeiro"
+	case "commercial":
+		req.Department = "Comercial"
+	case "doubts":
+		req.Department = "Atendimento Geral"
+	}
+	if req.Department == "" {
+		req.Department = "Suporte Técnico"
 	}
 
 	conv, err := h.chatService.CreateConversation(req)
@@ -197,28 +240,65 @@ func (h *Handler) HandleAssignOperator(w http.ResponseWriter, r *http.Request) {
 	h.hub.BroadcastToRoom(id, &models.WSAction{
 		Type: "operator_assigned",
 		Payload: map[string]string{
-			"operatorId":   body.OperatorID,
-			"operatorName": body.OperatorName,
+			"conversationId": id,
+			"operatorId":     body.OperatorID,
+			"operatorName":   body.OperatorName,
 		},
 	}, nil)
+
+	// Broadcast da mensagem de sistema informando que o operador assumiu
+	h.hub.BroadcastToRoom(id, &models.WSAction{
+		Type: "message",
+		Payload: &models.Message{
+			ID:             "sys-assign-" + uuid.New().String()[:8],
+			ConversationID: id,
+			SenderID:       "system",
+			SenderType:     models.SenderSystem,
+			SenderName:     "Sistema SOL",
+			Content:        fmt.Sprintf("O atendente %s assumiu o atendimento.", body.OperatorName),
+			Timestamp:      time.Now().UTC().Format(time.RFC3339),
+			Status:         models.StatusDelivered,
+		},
+	}, nil)
+
+	// Atualiza operadores para sincronizar listas em tempo real
+	h.hub.BroadcastToOperators(&models.WSAction{
+		Type:    "conversation_updated",
+		Payload: conv,
+	})
 
 	h.respondJSON(w, http.StatusOK, conv)
 }
 
-// HandleCloseConversation encerra a conversa
+// HandleCloseConversation encerra a conversa utilizando a mensagem configurada ou personalizada
 func (h *Handler) HandleCloseConversation(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
 	if err := h.chatService.CloseConversation(id); err != nil {
 		h.respondJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
 
-	// Broadcast para os participantes da sala (cliente)
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		if h.db != nil {
+			reason = h.db.GetCloseMessage()
+		} else {
+			reason = "Atendimento encerrado com sucesso! Agradecemos o seu contato."
+		}
+	}
+
+	// Broadcast para os participantes da sala (cliente) com a mensagem real configurada
 	h.hub.BroadcastToRoom(id, &models.WSAction{
 		Type: "chat_closed",
 		Payload: map[string]string{
 			"conversationId": id,
-			"reason":         "Atendimento encerrado pelo operador",
+			"reason":         reason,
 		},
 	}, nil)
 
@@ -227,10 +307,70 @@ func (h *Handler) HandleCloseConversation(w http.ResponseWriter, r *http.Request
 		Type: "chat_closed",
 		Payload: map[string]string{
 			"conversationId": id,
+			"reason":         reason,
 		},
 	})
 
-	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Conversa encerrada"})
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Conversa encerrada", "reason": reason})
+}
+
+// HandleGetSettings retorna as configurações globais de chat e fluxo do bot
+func (h *Handler) HandleGetSettings(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		h.respondJSON(w, http.StatusOK, database.DefaultSettings())
+		return
+	}
+
+	settings, err := h.db.GetChatSettings()
+	if err != nil {
+		h.respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "Erro ao carregar configurações"})
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, settings)
+}
+
+// HandleSaveSettings salva as configurações de mensagens e o fluxo visual do chatbot
+// Regras de segurança RBAC (Regras 1, 2, 4 do AGENTS.md): Apenas Gestor e Administrador
+func (h *Handler) HandleSaveSettings(w http.ResponseWriter, r *http.Request) {
+	user := h.extractAuthUser(r)
+	if user == nil {
+		h.respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "Autenticação obrigatória"})
+		return
+	}
+
+	if user.Role != models.RoleAdmin && user.Role != models.RoleGestor {
+		h.respondJSON(w, http.StatusForbidden, map[string]string{"error": "Acesso não autorizado para operadores"})
+		return
+	}
+
+	var req models.ChatSettings
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Payload JSON inválido"})
+		return
+	}
+
+	// Validação rigorosa dos dados (Regra 1 de Segurança)
+	if strings.TrimSpace(req.CloseMessage) == "" {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "A mensagem de encerramento não pode ser vazia"})
+		return
+	}
+	if len(req.CloseMessage) > 1000 {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "A mensagem de encerramento excede o limite de 1000 caracteres"})
+		return
+	}
+
+	if h.db != nil {
+		if err := h.db.SaveChatSettings(&req); err != nil {
+			h.respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "Erro ao salvar configurações no banco de dados"})
+			return
+		}
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"message":  "Configurações salvas com sucesso!",
+		"settings": req,
+	})
 }
 
 // HandleCustomerLookup executa consultas concorrentes em sistemas externos
@@ -255,6 +395,23 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	h.respondJSON(w, http.StatusOK, map[string]string{
 		"status": "healthy",
 		"system": "Chat-Interno Go Backend",
+	})
+}
+
+// HandleResetAll encerra todas as conversas e limpa todo o histórico em memória
+func (h *Handler) HandleResetAll(w http.ResponseWriter, r *http.Request) {
+	h.chatService.ResetAll()
+
+	// Notifica todos os operadores globais para zerar as telas em tempo real
+	h.hub.BroadcastToOperators(&models.WSAction{
+		Type: "conversations_cleared",
+		Payload: map[string]string{
+			"message": "Todas as conversas e históricos foram limpos para novos testes",
+		},
+	})
+
+	h.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "Todas as conversas e históricos foram limpos com sucesso",
 	})
 }
 

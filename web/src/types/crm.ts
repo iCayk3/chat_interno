@@ -16,6 +16,7 @@ export type CrmMenuId =
   | 'atendimento_auditoria'
   | 'integracoes_gerenciar'
   | 'integracoes_chaves'
+  | 'config_rede'
   | 'meus_dados'
   | 'meu_perfil';
 
@@ -74,6 +75,7 @@ export interface RBXUnpaidDocument {
   historic: string;
   comments?: string;
   pixCopiaCola?: string;
+  pixQrCode?: string;
   boletoLink?: string;
   status: 'aberto' | 'vencido' | 'hoje';
 }
@@ -95,6 +97,11 @@ export interface RBXConfig {
   version: 'v1' | 'v2';
   enabled: boolean;
   simulationMode: boolean;
+}
+
+export interface RBXCustomerGroup {
+  codigo: string;
+  nome: string;
 }
 
 export interface AuthUser {
@@ -185,4 +192,119 @@ export interface AuditLogItem {
   resource: string;
   ipAddress: string;
   severity: 'info' | 'warning' | 'security';
+}
+
+export interface DeviceRegistration {
+  deviceId: string;
+  cpfCnpj: string;
+  clientName: string;
+  platform: string;
+  pushToken?: string;
+  appVersion?: string;
+  olt?: string;
+  pon?: string;
+  cto?: string;
+  rbxGroup?: string;
+  lastSeenAt: string;
+  createdAt: string;
+}
+
+export type CampaignTargetType = 'all' | 'specific' | 'dept' | 'network' | 'rbx_group';
+
+export interface Campaign {
+  id: string;
+  title: string;
+  message: string;
+  department: string;
+  targetType: CampaignTargetType;
+  targetCpfs?: string[];
+  targetOlt?: string;
+  targetPon?: string;
+  targetCto?: string;
+  targetOlts?: string[];
+  targetPons?: string[];
+  targetCtos?: string[];
+  targetRbxGroup?: string;
+  targetRbxGroupName?: string;
+  targetRbxGroups?: string[];
+  targetRbxGroupNames?: string[];
+  target: string;
+  actionType: 'chat_and_view' | 'view_only';
+  chatInitialMsg?: string;
+  status: 'rascunho' | 'ativa' | 'concluida';
+  sentCount: number;
+  deliveredRate: string;
+  createdAt: string;
+  createdBy?: string;
+}
+
+export interface DispatchResult {
+  campaignId: string;
+  totalTargeted: number;
+  deliveredRealtime: number;
+  message: string;
+}
+
+// Modelos da Infraestrutura de Rede FTTH
+export interface NetworkCto {
+  id: string;
+  ponId: string;
+  slotId: string;
+  oltId: string;
+  name: string;
+  splitterRatio?: string;
+  totalPorts: number;
+  address?: string;
+  coordinates?: string;
+  notes?: string;
+  createdAt?: string;
+}
+
+export interface NetworkPon {
+  id: string;
+  slotId: string;
+  oltId: string;
+  ponNumber: number;
+  name: string;
+  sfpType?: string;
+  ctos?: NetworkCto[];
+  createdAt?: string;
+}
+
+export interface NetworkSlot {
+  id: string;
+  oltId: string;
+  slotNumber: number;
+  name: string;
+  cardType?: string;
+  ponCount?: number;
+  pons?: NetworkPon[];
+  createdAt?: string;
+}
+
+export interface NetworkOlt {
+  id: string;
+  name: string;
+  model?: string;
+  ip?: string;
+  location?: string;
+  description?: string;
+  slotCount?: number;
+  ponsPerSlot?: number;
+  slots?: NetworkSlot[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CreateCtosBatchRequest {
+  ponId: string;
+  names?: string[];
+  prefix?: string;
+  startIndex?: number;
+  count?: number;
+  splitterRatio?: string;
+  totalPorts?: number;
+  address?: string;
+  coordinates?: string;
+  notes?: string;
 }

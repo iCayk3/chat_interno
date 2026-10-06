@@ -19,6 +19,7 @@ import {
   ChevronRight,
   ShieldCheck,
   LogOut,
+  Network,
 } from 'lucide-react';
 import type { CrmMenuId, UserRole, AuthUser } from '../../types/crm';
 
@@ -161,6 +162,17 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
           label: 'Chaves para acesso',
           icon: Lock,
           allowedRoles: ['admin'], // Chaves e tokens estritamente para admin
+        },
+      ],
+    },
+    {
+      title: 'CONFIGURAÇÕES',
+      items: [
+        {
+          id: 'config_rede',
+          label: 'Rede',
+          icon: Network,
+          allowedRoles: ['gestor', 'admin'],
         },
       ],
     },

@@ -22,7 +22,12 @@ export interface Conversation {
   id: string;
   clientId: string;
   clientName: string;
+  contactName?: string;
+  cpfCnpj?: string;
   department?: string;
+  olt?: string;
+  pon?: string;
+  cto?: string;
   status: ConversationStatus;
   operator?: OperatorInfo;
   createdAt: string;

@@ -6,6 +6,15 @@ import type {
   RBXClient,
   RBXFinancialSummary,
   RBXConfig,
+  RBXCustomerGroup,
+  Campaign,
+  DeviceRegistration,
+  DispatchResult,
+  NetworkOlt,
+  NetworkSlot,
+  NetworkPon,
+  NetworkCto,
+  CreateCtosBatchRequest,
 } from '../types/crm';
 
 function getAuthHeaders(): HeadersInit {
@@ -179,6 +188,22 @@ export const api = {
     if (!res.ok) throw new Error('Falha ao encerrar conversa');
   },
 
+  async updateConversationNetwork(
+    id: string,
+    data: { olt: string; pon: string; cto: string; cpfCnpj?: string }
+  ): Promise<{ success: boolean; olt: string; pon: string; cto: string }> {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/network`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao atualizar dados de rede');
+    }
+    return res.json();
+  },
+
   // --- Configurações de Atendimento, Mensagens & Fluxo do Bot ---
   async getSettings(): Promise<ChatSettings> {
     const res = await fetch('/api/settings', { headers: getAuthHeaders() });
@@ -231,13 +256,29 @@ export const api = {
     return res.json();
   },
 
-  async getRbxPix(billetId: number): Promise<{ billetId: number; pixCopiaCola: string }> {
+  async getRbxPix(billetId: number): Promise<{ billetId: number; pixCopiaCola: string; pixQrCode?: string }> {
     const res = await fetch('/api/erp/rbx/pix', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({ billetId }),
     });
-    if (!res.ok) throw new Error('Falha ao obter Pix do boleto');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao obter Pix do boleto');
+    }
+    return res.json();
+  },
+
+  async getRbxQRCode(billetId: number): Promise<{ billetId: number; pixQrCode: string }> {
+    const res = await fetch('/api/erp/rbx/qrcode', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ billetId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao obter QR Code do Pix');
+    }
     return res.json();
   },
 
@@ -247,7 +288,32 @@ export const api = {
       headers: getAuthHeaders(),
       body: JSON.stringify({ documentId }),
     });
-    if (!res.ok) throw new Error('Falha ao gerar boleto em PDF');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao gerar boleto em PDF no RBX');
+    }
+    return res.json();
+  },
+
+  async sendRbxBoletoToChat(params: {
+    conversationId: string;
+    documentId: number;
+    documentNumber?: string;
+    value?: number;
+    dueDate?: string;
+    historic?: string;
+    senderId?: string;
+    senderName?: string;
+  }): Promise<{ success: boolean; message: string; fileUrl: string; chatMsg: any }> {
+    const res = await fetch('/api/erp/rbx/boleto/send', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao enviar boleto no chat');
+    }
     return res.json();
   },
 
@@ -290,11 +356,249 @@ export const api = {
     return res.json();
   },
 
+  async getRbxGroups(): Promise<RBXCustomerGroup[]> {
+    const res = await fetch('/api/erp/rbx/groups', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao buscar grupos do RBX');
+    }
+    return res.json();
+  },
+
+  async getRbxGroupClients(groupCode: string): Promise<RBXClient[]> {
+    const res = await fetch(`/api/erp/rbx/groups/${encodeURIComponent(groupCode)}/clients`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao buscar clientes do grupo no RBX');
+    }
+    return res.json();
+  },
+
   async resetAll(): Promise<void> {
     const res = await fetch('/api/conversations/reset', {
       method: 'POST',
       headers: getAuthHeaders(),
     });
     if (!res.ok) throw new Error('Falha ao resetar histórico');
+  },
+
+  // --- Campanhas & Disparos em Massa ---
+  async listCampaigns(): Promise<Campaign[]> {
+    const res = await fetch('/api/campaigns', { headers: getAuthHeaders() });
+    if (!res.ok) throw new Error('Falha ao listar campanhas');
+    return res.json();
+  },
+
+  async saveCampaign(camp: Partial<Campaign>): Promise<Campaign> {
+    const res = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(camp),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar campanha');
+    }
+    return res.json();
+  },
+
+  async dispatchCampaign(id: string): Promise<DispatchResult> {
+    const res = await fetch(`/api/campaigns/${id}/dispatch`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao disparar campanha');
+    }
+    return res.json();
+  },
+
+  async listDevices(): Promise<DeviceRegistration[]> {
+    const res = await fetch('/api/devices', { headers: getAuthHeaders() });
+    if (!res.ok) throw new Error('Falha ao listar dispositivos');
+    return res.json();
+  },
+
+  // --- Gestão da Hierarquia FTTH (OLT -> Slot -> PON -> CTO) ---
+  async getNetworkTree(): Promise<NetworkOlt[]> {
+    const res = await fetch('/api/network/tree', { headers: getAuthHeaders() });
+    if (!res.ok) throw new Error('Falha ao buscar árvore de rede FTTH');
+    return res.json();
+  },
+
+  async createOlt(data: Partial<NetworkOlt>): Promise<NetworkOlt> {
+    const res = await fetch('/api/network/olts', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao cadastrar OLT');
+    }
+    return res.json();
+  },
+
+  async updateOlt(id: string, data: Partial<NetworkOlt>): Promise<NetworkOlt> {
+    const res = await fetch(`/api/network/olts/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao atualizar OLT');
+    }
+    return res.json();
+  },
+
+  async deleteOlt(id: string): Promise<void> {
+    const res = await fetch(`/api/network/olts/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new Error('Falha ao excluir OLT');
+  },
+
+  async createSlot(data: Partial<NetworkSlot>): Promise<NetworkSlot> {
+    const res = await fetch('/api/network/slots', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao cadastrar Slot');
+    }
+    return res.json();
+  },
+
+  async updateSlot(id: string, data: Partial<NetworkSlot>): Promise<NetworkSlot> {
+    const res = await fetch(`/api/network/slots/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao atualizar Slot');
+    }
+    return res.json();
+  },
+
+  async deleteSlot(id: string): Promise<void> {
+    const res = await fetch(`/api/network/slots/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new Error('Falha ao excluir Slot');
+  },
+
+  async createPon(data: Partial<NetworkPon>): Promise<NetworkPon> {
+    const res = await fetch('/api/network/pons', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao cadastrar porta PON');
+    }
+    return res.json();
+  },
+
+  async updatePon(id: string, data: Partial<NetworkPon>): Promise<NetworkPon> {
+    const res = await fetch(`/api/network/pons/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao atualizar porta PON');
+    }
+    return res.json();
+  },
+
+  async deletePon(id: string): Promise<void> {
+    const res = await fetch(`/api/network/pons/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new Error('Falha ao excluir porta PON');
+  },
+
+  async createCto(data: Partial<NetworkCto>): Promise<NetworkCto> {
+    const res = await fetch('/api/network/ctos', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao cadastrar CTO');
+    }
+    return res.json();
+  },
+
+  async createCtosBatch(data: CreateCtosBatchRequest): Promise<{ success: boolean; count: number; ctos: NetworkCto[] }> {
+    const res = await fetch('/api/network/ctos/batch', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao cadastrar lote de CTOs');
+    }
+    return res.json();
+  },
+
+  async updateCto(id: string, data: Partial<NetworkCto>): Promise<NetworkCto> {
+    const res = await fetch(`/api/network/ctos/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao atualizar CTO');
+    }
+    return res.json();
+  },
+
+  async deleteCto(id: string): Promise<void> {
+    const res = await fetch(`/api/network/ctos/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new Error('Falha ao excluir CTO');
+  },
+
+  // Consulta e associação de infraestrutura FTTH (OLT/PON/CTO) por CPF do cliente
+  async getCustomerNetwork(cpf: string): Promise<{ cpfCnpj: string; olt: string; pon: string; cto: string }> {
+    const res = await fetch(`/api/network/customer?cpf=${encodeURIComponent(cpf)}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new Error('Falha ao buscar rede do cliente');
+    return res.json();
+  },
+
+  async saveCustomerNetwork(data: { cpfCnpj: string; olt: string; pon: string; cto: string }): Promise<any> {
+    const res = await fetch('/api/network/customer', {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar associação da rede ao cliente');
+    }
+    return res.json();
   },
 };

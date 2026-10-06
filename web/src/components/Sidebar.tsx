@@ -32,11 +32,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const waitingCount = conversations.filter(c => c.status === 'waiting').length;
   const activeCount = conversations.filter(c => c.status === 'active').length;
+  const closedCount = conversations.filter(c => c.status === 'closed').length;
 
   const filtered = conversations.filter(c => {
     const matchesTab = c.status === activeTab;
-    const matchesSearch = c.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (c.department && c.department.toLowerCase().includes(searchTerm.toLowerCase()));
+    const term = searchTerm.toLowerCase();
+    const matchesSearch = c.clientName.toLowerCase().includes(term) ||
+      (c.contactName && c.contactName.toLowerCase().includes(term)) ||
+      (c.cpfCnpj && c.cpfCnpj.includes(term)) ||
+      (c.id && c.id.toLowerCase().includes(term)) ||
+      (c.department && c.department.toLowerCase().includes(term));
     return matchesTab && matchesSearch;
   });
 
@@ -148,6 +153,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           }`}
         >
           <span>Finalizados</span>
+          {closedCount > 0 && (
+            <span className="px-1.5 py-0.2 rounded-full bg-slate-400 text-white text-[10px] font-bold">
+              {closedCount}
+            </span>
+          )}
         </button>
       </div>
 
@@ -173,13 +183,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <div className="font-semibold text-sm text-slate-800 truncate max-w-[170px]">
-                    {conv.clientName}
+                    {conv.contactName && conv.contactName !== conv.clientName ? conv.contactName : conv.clientName}
                   </div>
                   <div className="text-[11px] text-slate-400 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
                     {formatTime(conv.createdAt)}
                   </div>
                 </div>
+
+                {conv.contactName && conv.contactName !== conv.clientName && (
+                  <div className="text-[11px] text-slate-500 truncate" title={`Titular: ${conv.clientName}`}>
+                    Titular: <span className="font-medium text-slate-700">{conv.clientName}</span>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-between text-xs">
                   <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 font-medium text-[11px]">

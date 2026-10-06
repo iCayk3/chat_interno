@@ -24,6 +24,7 @@ import { DadosEmpresaView } from './components/crm/DadosEmpresaView';
 import { ChavesAcessoView } from './components/crm/ChavesAcessoView';
 import { UsuariosGerenciaView } from './components/crm/UsuariosGerenciaView';
 import { MeusDadosView } from './components/crm/MeusDadosView';
+import { ConfigRedeView } from './components/crm/ConfigRedeView';
 import { MeuPerfilModal } from './components/crm/MeuPerfilModal';
 import { isSameDepartment } from './utils/rbac';
 
@@ -384,6 +385,9 @@ export const App: React.FC = () => {
 
       case 'atendimento_campanhas':
         return <CampanhasView userRole={userRole} currentUser={currentUser} />;
+
+      case 'config_rede':
+        return <ConfigRedeView userRole={userRole} currentUser={currentUser} />;
 
       case 'meus_dados':
         return (

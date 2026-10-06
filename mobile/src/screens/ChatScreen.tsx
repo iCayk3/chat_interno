@@ -17,7 +17,7 @@ import { RootStackParamList, Message, ConversationSession } from '../types/chat'
 import { colors } from '../theme/colors';
 import { ChatMessageItem } from '../components/ChatMessageItem';
 import { ChatInputBar } from '../components/ChatInputBar';
-import { chatSocket } from '../services/chatSocket';
+import { chatSocket, getApiHttpBaseUrl } from '../services/chatSocket';
 import { storage } from '../services/storage';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Chat'>;
@@ -36,19 +36,20 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
     }
   );
 
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 'sys-start',
-      conversationId: session.id,
-      senderId: 'system',
-      senderType: 'system',
-      senderName: 'Sistema',
-      content: `Olá, ${client.name}! Sua solicitação foi recebida. Um operador logo irá atender você.`,
-      timestamp: new Date().toISOString(),
-      status: 'delivered',
-    },
-  ]);
+  const defaultGreeting: Message = {
+    id: 'sys-start',
+    conversationId: session.id,
+    senderId: 'system',
+    senderType: 'system',
+    senderName: 'Sistema',
+    content: client.contactName && client.contactName !== client.name
+      ? `Olá, ${client.contactName}! Sua solicitação referente ao titular ${client.name} foi recebida. Um operador logo irá atender você.`
+      : `Olá, ${client.name}! Sua solicitação foi recebida. Um operador logo irá atender você.`,
+    timestamp: new Date().toISOString(),
+    status: 'delivered',
+  };
 
+  const [messages, setMessages] = useState<Message[]>([defaultGreeting]);
   const [isTyping, setIsTyping] = useState(false);
   const [typingUser, setTypingUser] = useState('');
   const [isConnected, setIsConnected] = useState(false);
@@ -56,12 +57,55 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
 
   const flatListRef = useRef<FlatList>(null);
 
+  // Carrega histórico de mensagens persistido imediatamente para não iniciar em branco
+  useEffect(() => {
+    (async () => {
+      try {
+        const cached = await storage.getConversationMessages(session.id);
+        if (cached && cached.length > 0) {
+          setMessages(cached);
+        } else {
+          storage.saveConversationMessages(session.id, [defaultGreeting]);
+        }
+
+        // Sincroniza em segundo plano com o servidor Go
+        const baseUrl = getApiHttpBaseUrl();
+        const res = await fetch(`${baseUrl}/api/conversations/${session.id}/messages?limit=100`);
+        if (res.ok) {
+          const serverMsgs: Message[] = await res.json();
+          if (serverMsgs && serverMsgs.length > 0) {
+            setMessages((prev) => {
+              const map = new Map<string, Message>();
+              prev.forEach((m) => map.set(m.id, m));
+              serverMsgs.forEach((m) => map.set(m.id, m));
+              const merged = Array.from(map.values()).sort(
+                (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+              );
+              storage.saveConversationMessages(session.id, merged);
+              return merged;
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('[CHAT] Erro ao sincronizar mensagens:', err);
+      }
+    })();
+  }, [session.id]);
+
   useEffect(() => {
     // Save session in storage
     storage.saveCurrentSession(session);
 
     // Connect to WebSocket / real-time service
-    chatSocket.connect(session.id, client.id, client.name, client.department);
+    chatSocket.connect(
+      session.id,
+      client.id,
+      client.name,
+      client.department,
+      client.contactName,
+      client.cpfCnpj
+    );
+    chatSocket.joinRoom(session.id, client.department);
 
     const unsubMsg = chatSocket.onMessage((newMsg) => {
       if (newMsg.conversationId && newMsg.conversationId !== session.id) {
@@ -71,7 +115,9 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
       setIsTyping(false);
       setMessages((prev) => {
         if (prev.some((m) => m.id === newMsg.id)) return prev;
-        return [...prev, newMsg];
+        const updated = [...prev, newMsg];
+        storage.saveConversationMessages(session.id, updated);
+        return updated;
       });
 
       if (newMsg.senderType === 'operator' && newMsg.senderName) {
@@ -108,8 +154,8 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
     // Sincroniza dados do operador com o servidor Go caso a sessão já possua operador atribuído
     const checkServerSession = async () => {
       try {
-        const host = typeof window !== 'undefined' && window.location?.hostname === 'localhost' ? 'localhost' : '10.12.199.3';
-        const res = await fetch(`http://${host}:8080/api/conversations/${session.id}`);
+        const baseUrl = getApiHttpBaseUrl();
+        const res = await fetch(`${baseUrl}/api/conversations/${session.id}`);
         if (res.ok) {
           const conv = await res.json();
           if (conv.operator && conv.operator.name) {
@@ -155,6 +201,7 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
       };
       setSession(closedSession);
       storage.saveCurrentSession(closedSession);
+      storage.saveClosedSession(closedSession);
 
       const sysMsg: Message = {
         id: 'sys-closed-' + Date.now(),
@@ -166,7 +213,11 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
         timestamp: new Date().toISOString(),
         status: 'delivered',
       };
-      setMessages((prev) => [...prev, sysMsg]);
+      setMessages((prev) => {
+        const updated = [...prev, sysMsg];
+        storage.saveConversationMessages(session.id, updated);
+        return updated;
+      });
     });
 
     return () => {
@@ -200,7 +251,14 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
 
       // Reconecta o socket para a nova sala
       chatSocket.disconnect();
-      chatSocket.connect(newConvId, client.id, client.name, client.department);
+      chatSocket.connect(
+        newConvId,
+        client.id,
+        client.name,
+        client.department,
+        client.contactName,
+        client.cpfCnpj
+      );
 
       const sysRestartMsg: Message = {
         id: 'sys-start-' + Date.now(),
@@ -212,21 +270,30 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
         timestamp: new Date().toISOString(),
         status: 'delivered',
       };
-      setMessages((prev) => [...prev, sysRestartMsg]);
+      setMessages((prev) => {
+        const updated = [...prev, sysRestartMsg];
+        storage.saveConversationMessages(newConvId, updated);
+        return updated;
+      });
     }
 
+    const senderDisplayName = client.contactName || client.name;
     const newMsg: Message = {
       id: 'msg-' + Date.now(),
       conversationId: currentConvId,
       senderId: client.id,
       senderType: 'client',
-      senderName: client.name,
+      senderName: senderDisplayName,
       content: text,
       timestamp: new Date().toISOString(),
       status: 'sent',
     };
 
-    setMessages((prev) => [...prev, newMsg]);
+    setMessages((prev) => {
+      const updated = [...prev, newMsg];
+      storage.saveConversationMessages(currentConvId, updated);
+      return updated;
+    });
     chatSocket.sendMessage(newMsg);
   };
 
@@ -250,11 +317,12 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
             };
             setSession(closedSession);
             await storage.saveCurrentSession(closedSession);
+            await storage.saveClosedSession(closedSession);
 
-            // Avisa o servidor via REST se possível
+            // Avisa o servidor via REST
             try {
-              const host = chatSocket.getConnected() ? '10.12.199.3' : 'localhost';
-              await fetch(`http://${host}:8080/api/conversations/${session.id}/close`, { method: 'POST' });
+              const baseUrl = getApiHttpBaseUrl();
+              await fetch(`${baseUrl}/api/conversations/${session.id}/close`, { method: 'POST' });
             } catch {}
 
             const sysCloseMsg: Message = {
@@ -267,7 +335,11 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
               timestamp: new Date().toISOString(),
               status: 'delivered',
             };
-            setMessages((prev) => [...prev, sysCloseMsg]);
+            setMessages((prev) => {
+              const updated = [...prev, sysCloseMsg];
+              storage.saveConversationMessages(session.id, updated);
+              return updated;
+            });
           },
         },
       ]

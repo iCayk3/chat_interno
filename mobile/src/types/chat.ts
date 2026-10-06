@@ -16,7 +16,9 @@ export interface Message {
 export interface ClientProfile {
   id: string;
   name: string;
+  contactName?: string;
   emailOrDoc?: string;
+  cpfCnpj?: string;
   department?: string;
 }
 
@@ -24,6 +26,9 @@ export interface ConversationSession {
   id: string;
   clientId: string;
   clientName: string;
+  contactName?: string;
+  cpfCnpj?: string;
+  department?: string;
   status: 'waiting' | 'active' | 'closed';
   operator?: {
     id: string;

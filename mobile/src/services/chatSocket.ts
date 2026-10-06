@@ -6,6 +6,7 @@ type StatusHandler = (connected: boolean) => void;
 type TypingHandler = (isTyping: boolean, senderName: string) => void;
 type ChatClosedHandler = (reason: string) => void;
 type OperatorAssignedHandler = (operatorId: string, operatorName: string) => void;
+type NotificationHandler = (notification: any) => void;
 
 function getWebSocketUrl(): string {
   // 1. Se estiver rodando no navegador (Web)
@@ -20,13 +21,18 @@ function getWebSocketUrl(): string {
   const hostUri = Constants.expoConfig?.hostUri || (Constants as any).manifest2?.extra?.expoClient?.hostUri;
   if (hostUri) {
     const ip = hostUri.split(':')[0];
-    if (ip && ip !== 'localhost') {
+    if (ip && ip !== 'localhost' && ip !== '127.0.0.1' && !ip.startsWith('127.')) {
       return `ws://${ip}:8080/ws`;
     }
   }
 
   // 3. Fallback para o IP ativo da máquina na rede SOL-PROVEDOR_5G
   return 'ws://10.12.199.3:8080/ws';
+}
+
+export function getApiHttpBaseUrl(): string {
+  const wsUrl = getWebSocketUrl();
+  return wsUrl.replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://').replace(/\/ws\/?$/i, '');
 }
 
 class ChatSocketService {
@@ -37,6 +43,7 @@ class ChatSocketService {
   private typingListeners: TypingHandler[] = [];
   private chatClosedListeners: ChatClosedHandler[] = [];
   private operatorAssignedListeners: OperatorAssignedHandler[] = [];
+  private notificationListeners: NotificationHandler[] = [];
   private reconnectTimer: any = null;
   private outboxQueue: string[] = []; // Fila de envio garantido para mensagens nunca se perderem
 
@@ -44,14 +51,48 @@ class ChatSocketService {
     return this.isConnected;
   }
 
-  public connect(conversationId: string, clientId: string, clientName: string, department: string = '') {
+  public joinRoom(conversationId: string, department: string = '') {
+    if (!conversationId) return;
+    const raw = JSON.stringify({
+      type: 'join_room',
+      payload: { conversationId, department },
+    });
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(raw);
+    } else {
+      this.outboxQueue.push(raw);
+    }
+  }
+
+  public connect(
+    conversationId: string,
+    clientId: string,
+    clientName: string,
+    department: string = '',
+    contactName: string = '',
+    cpfCnpj: string = '',
+    deviceId: string = ''
+  ) {
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
+      if (conversationId) {
+        this.joinRoom(conversationId, department);
+      }
       return;
     }
 
     try {
       const baseUrl = getWebSocketUrl();
-      const url = `${baseUrl}?conversationId=${conversationId}&clientId=${clientId}&clientName=${encodeURIComponent(clientName)}&department=${encodeURIComponent(department)}`;
+      const params = new URLSearchParams({
+        conversationId,
+        clientId,
+        clientName,
+        department,
+      });
+      if (contactName) params.append('contactName', contactName);
+      if (cpfCnpj) params.append('cpfCnpj', cpfCnpj);
+      if (deviceId) params.append('deviceId', deviceId);
+
+      const url = `${baseUrl}?${params.toString()}`;
       console.log('[MOBILE WS] Conectando a:', url);
       this.socket = new WebSocket(url);
 
@@ -85,6 +126,8 @@ class ChatSocketService {
             } else if (data.type === 'chat_closed') {
               const reason = data.payload?.reason || 'Atendimento encerrado pelo operador';
               this.notifyChatClosed(reason);
+            } else if (data.type === 'campaign_notification' && data.payload) {
+              this.notifyNotification(data.payload);
             }
           }
         } catch (e) {
@@ -95,7 +138,7 @@ class ChatSocketService {
       this.socket.onclose = () => {
         this.isConnected = false;
         this.notifyStatus(false);
-        this.scheduleReconnect(conversationId, clientId, clientName);
+        this.scheduleReconnect(conversationId, clientId, clientName, department, contactName, cpfCnpj, deviceId);
       };
 
       this.socket.onerror = (e) => {
@@ -107,15 +150,23 @@ class ChatSocketService {
       console.warn('[MOBILE WS] Falha ao iniciar WebSocket:', e);
       this.isConnected = false;
       this.notifyStatus(false);
-      this.scheduleReconnect(conversationId, clientId, clientName);
+      this.scheduleReconnect(conversationId, clientId, clientName, department, contactName, cpfCnpj, deviceId);
     }
   }
 
-  private scheduleReconnect(conversationId: string, clientId: string, clientName: string) {
+  private scheduleReconnect(
+    conversationId: string,
+    clientId: string,
+    clientName: string,
+    department: string = '',
+    contactName: string = '',
+    cpfCnpj: string = '',
+    deviceId: string = ''
+  ) {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       console.log('[MOBILE WS] Tentando reconectar ao Go Server...');
-      this.connect(conversationId, clientId, clientName);
+      this.connect(conversationId, clientId, clientName, department, contactName, cpfCnpj, deviceId);
     }, 4000);
   }
 
@@ -196,6 +247,17 @@ class ChatSocketService {
 
   private notifyOperatorAssigned(operatorId: string, operatorName: string) {
     this.operatorAssignedListeners.forEach((h) => h(operatorId, operatorName));
+  }
+
+  public onNotification(handler: NotificationHandler) {
+    this.notificationListeners.push(handler);
+    return () => {
+      this.notificationListeners = this.notificationListeners.filter((h) => h !== handler);
+    };
+  }
+
+  private notifyNotification(notif: any) {
+    this.notificationListeners.forEach((h) => h(notif));
   }
 
   public disconnect() {

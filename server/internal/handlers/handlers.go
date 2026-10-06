@@ -20,13 +20,16 @@ import (
 )
 
 type Handler struct {
-	chatService *services.ChatService
-	extService  *services.ExternalAPIService
-	authService *services.AuthService
-	rbxService  *services.RBXService
-	db          *database.DB
-	hub         *ws.Hub
-	upgrader    websocket.Upgrader
+	chatService     *services.ChatService
+	extService      *services.ExternalAPIService
+	authService     *services.AuthService
+	rbxService      *services.RBXService
+	fileService     *services.FileService
+	campaignService *services.CampaignService
+	networkService  *services.NetworkService
+	db              *database.DB
+	hub             *ws.Hub
+	upgrader        websocket.Upgrader
 }
 
 func NewHandler(
@@ -34,6 +37,9 @@ func NewHandler(
 	extService *services.ExternalAPIService,
 	authService *services.AuthService,
 	rbxService *services.RBXService,
+	fileService *services.FileService,
+	campaignService *services.CampaignService,
+	networkService *services.NetworkService,
 	db *database.DB,
 	hub *ws.Hub,
 	allowedOrigins []string,
@@ -57,13 +63,16 @@ func NewHandler(
 	}
 
 	return &Handler{
-		chatService: chatService,
-		extService:  extService,
-		authService: authService,
-		rbxService:  rbxService,
-		db:          db,
-		hub:         hub,
-		upgrader:    upgrader,
+		chatService:     chatService,
+		extService:      extService,
+		authService:     authService,
+		rbxService:      rbxService,
+		fileService:     fileService,
+		campaignService: campaignService,
+		networkService:  networkService,
+		db:              db,
+		hub:             hub,
+		upgrader:        upgrader,
 	}
 }
 
@@ -72,6 +81,8 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	convID := r.URL.Query().Get("conversationId")
 	clientID := r.URL.Query().Get("clientId")
 	clientName := r.URL.Query().Get("clientName")
+	contactName := r.URL.Query().Get("contactName")
+	cpfCnpj := r.URL.Query().Get("cpfCnpj")
 	senderType := r.URL.Query().Get("senderType")
 
 	if clientID == "" {
@@ -79,6 +90,9 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	if clientName == "" {
 		clientName = "Cliente"
+	}
+	if contactName == "" {
+		contactName = clientName
 	}
 
 	sType := models.SenderClient
@@ -108,9 +122,11 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 				// Cria a conversa com o ID exato informado pelo mobile
 				newConv, _ := h.chatService.CreateConversationWithID(convID, models.StartChatRequest{
-					ClientID:   clientID,
-					ClientName: clientName,
-					Department: dept,
+					ClientID:    clientID,
+					ClientName:  clientName,
+					ContactName: contactName,
+					CpfCnpj:     cpfCnpj,
+					Department:  dept,
 				})
 				// Notifica operadores instantaneamente
 				if newConv != nil {
@@ -129,14 +145,29 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	senderDisplayName := clientName
+	if sType == models.SenderClient && contactName != "" {
+		senderDisplayName = contactName
+	}
+
+	deviceID := r.URL.Query().Get("deviceId")
+	cleanCpfDigits := ""
+	for _, ch := range cpfCnpj {
+		if ch >= '0' && ch <= '9' {
+			cleanCpfDigits += string(ch)
+		}
+	}
+
 	client := &ws.Client{
 		Hub:            h.hub,
 		Conn:           conn,
 		Send:           make(chan []byte, 256),
 		ConversationID: convID,
 		SenderID:       clientID,
-		SenderName:     clientName,
+		SenderName:     senderDisplayName,
 		SenderType:     sType,
+		CpfCnpj:        cleanCpfDigits,
+		DeviceID:       deviceID,
 		ChatService:    h.chatService,
 	}
 
@@ -183,10 +214,14 @@ func (h *Handler) HandleCreateConversation(w http.ResponseWriter, r *http.Reques
 	h.respondJSON(w, http.StatusCreated, conv)
 }
 
-// HandleListConversations lista conversas ativas ou em espera
+// HandleListConversations lista conversas ativas ou em espera com filtro opcional de CPF
 func (h *Handler) HandleListConversations(w http.ResponseWriter, r *http.Request) {
 	status := models.ConversationStatus(r.URL.Query().Get("status"))
-	list := h.chatService.ListConversations(status)
+	cpfCnpj := r.URL.Query().Get("cpfCnpj")
+	if cpfCnpj == "" {
+		cpfCnpj = r.URL.Query().Get("cpf")
+	}
+	list := h.chatService.ListConversationsWithFilter(status, cpfCnpj)
 	h.respondJSON(w, http.StatusOK, list)
 }
 
@@ -412,6 +447,120 @@ func (h *Handler) HandleResetAll(w http.ResponseWriter, r *http.Request) {
 
 	h.respondJSON(w, http.StatusOK, map[string]string{
 		"message": "Todas as conversas e históricos foram limpos com sucesso",
+	})
+}
+
+// HandleUpdateConversationNetwork atualiza a infraestrutura de rede (OLT, PON, CTO) de um cliente/conversa
+func (h *Handler) HandleUpdateConversationNetwork(w http.ResponseWriter, r *http.Request) {
+	convID := chi.URLParam(r, "id")
+	if convID == "" {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "ID da conversa é obrigatório"})
+		return
+	}
+
+	var body struct {
+		OLT     string `json:"olt"`
+		PON     string `json:"pon"`
+		CTO     string `json:"cto"`
+		CpfCnpj string `json:"cpfCnpj"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido"})
+		return
+	}
+
+	conv, err := h.chatService.UpdateNetworkInfo(convID, body.OLT, body.PON, body.CTO)
+	if err != nil {
+		h.respondJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+
+	cleanDoc := strings.TrimSpace(body.CpfCnpj)
+	if cleanDoc == "" {
+		cleanDoc = strings.TrimSpace(conv.CpfCnpj)
+	}
+
+	if cleanDoc != "" {
+		// 1. Salva explicitamente a associação CPF -> OLT, PON, CTO no banco para uso futuro permanente
+		if h.db != nil {
+			_ = h.db.SaveCustomerNetwork(cleanDoc, body.OLT, body.PON, body.CTO)
+		}
+		// 2. Atualiza o cadastro dos aparelhos para campanhas e disparos
+		_ = h.campaignService.UpdateDeviceNetwork(cleanDoc, body.OLT, body.PON, body.CTO)
+	}
+
+	// Notifica operadores via WebSocket para atualizar os cards em tempo real
+	h.hub.BroadcastToOperators(&models.WSAction{
+		Type:    "conversation_updated",
+		Payload: conv,
+	})
+
+	h.respondJSON(w, http.StatusOK, conv)
+}
+
+// HandleGetCustomerNetwork busca a infraestrutura de rede (OLT, PON, CTO) vinculada ao CPF
+func (h *Handler) HandleGetCustomerNetwork(w http.ResponseWriter, r *http.Request) {
+	cpf := r.URL.Query().Get("cpf")
+	if cpf == "" {
+		cpf = r.URL.Query().Get("cpfCnpj")
+	}
+	clean := strings.TrimSpace(cpf)
+	if clean == "" {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "CPF ou CNPJ é obrigatório"})
+		return
+	}
+
+	olt, pon, cto := "", "", ""
+	if h.db != nil {
+		var err error
+		olt, pon, cto, err = h.db.GetCustomerNetwork(clean)
+		if err != nil {
+			log.Printf("[NETWORK] Erro ao buscar rede do cliente por CPF: %v", err)
+		}
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{
+		"cpfCnpj": clean,
+		"olt":     olt,
+		"pon":     pon,
+		"cto":     cto,
+	})
+}
+
+// HandleSaveCustomerNetwork associa ou altera a OLT, PON e CTO vinculadas a um CPF
+func (h *Handler) HandleSaveCustomerNetwork(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CpfCnpj string `json:"cpfCnpj"`
+		OLT     string `json:"olt"`
+		PON     string `json:"pon"`
+		CTO     string `json:"cto"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido"})
+		return
+	}
+
+	clean := strings.TrimSpace(body.CpfCnpj)
+	if clean == "" {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "CPF ou CNPJ é obrigatório"})
+		return
+	}
+
+	if h.db != nil {
+		if err := h.db.SaveCustomerNetwork(clean, body.OLT, body.PON, body.CTO); err != nil {
+			h.respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "Erro ao salvar associação da CTO no banco"})
+			return
+		}
+	}
+	_ = h.campaignService.UpdateDeviceNetwork(clean, body.OLT, body.PON, body.CTO)
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Associação de CTO salva com sucesso para o CPF!",
+		"cpfCnpj": clean,
+		"olt":     body.OLT,
+		"pon":     body.PON,
+		"cto":     body.CTO,
 	})
 }
 

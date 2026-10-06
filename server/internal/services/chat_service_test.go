@@ -10,7 +10,7 @@ import (
 )
 
 func TestCreateConversationValid(t *testing.T) {
-	service := services.NewChatService()
+	service := services.NewChatService(nil)
 
 	req := models.StartChatRequest{
 		ClientID:   "client-123",
@@ -44,7 +44,7 @@ func TestCreateConversationValid(t *testing.T) {
 }
 
 func TestCreateConversationEmptyNameValidation(t *testing.T) {
-	service := services.NewChatService()
+	service := services.NewChatService(nil)
 
 	req := models.StartChatRequest{
 		ClientID:   "client-123",
@@ -58,7 +58,7 @@ func TestCreateConversationEmptyNameValidation(t *testing.T) {
 }
 
 func TestSaveMessageAndAntiIDOR(t *testing.T) {
-	service := services.NewChatService()
+	service := services.NewChatService(nil)
 
 	conv, err := service.CreateConversation(models.StartChatRequest{
 		ClientID:   "cliente-autorizado",
@@ -101,7 +101,7 @@ func TestSaveMessageAndAntiIDOR(t *testing.T) {
 }
 
 func TestAssignAndCloseConversation(t *testing.T) {
-	service := services.NewChatService()
+	service := services.NewChatService(nil)
 
 	conv, err := service.CreateConversation(models.StartChatRequest{
 		ClientID:   "client-99",

@@ -65,6 +65,121 @@ func (db *DB) runMigrations() error {
 		value JSONB NOT NULL,
 		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 	);
+
+	CREATE TABLE IF NOT EXISTS customer_network (
+		cpf_cnpj VARCHAR(32) PRIMARY KEY,
+		olt VARCHAR(100) DEFAULT '',
+		pon VARCHAR(100) DEFAULT '',
+		cto VARCHAR(100) DEFAULT '',
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS devices (
+		device_id VARCHAR(100) PRIMARY KEY,
+		cpf_cnpj VARCHAR(32) DEFAULT '',
+		client_name VARCHAR(150) DEFAULT '',
+		platform VARCHAR(32) DEFAULT '',
+		push_token TEXT DEFAULT '',
+		app_version VARCHAR(32) DEFAULT '',
+		olt VARCHAR(100) DEFAULT '',
+		pon VARCHAR(100) DEFAULT '',
+		cto VARCHAR(100) DEFAULT '',
+		rbx_group VARCHAR(100) DEFAULT '',
+		last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_customer_network_olt ON customer_network(olt);
+	CREATE INDEX IF NOT EXISTS idx_customer_network_cto ON customer_network(cto);
+	CREATE INDEX IF NOT EXISTS idx_devices_cpf ON devices(cpf_cnpj);
+	CREATE INDEX IF NOT EXISTS idx_devices_olt ON devices(olt);
+	CREATE INDEX IF NOT EXISTS idx_devices_cto ON devices(cto);
+
+	CREATE TABLE IF NOT EXISTS network_olts (
+		id VARCHAR(64) PRIMARY KEY,
+		name VARCHAR(150) NOT NULL,
+		model VARCHAR(100) DEFAULT '',
+		ip VARCHAR(64) DEFAULT '',
+		location VARCHAR(150) DEFAULT '',
+		description TEXT DEFAULT '',
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS network_slots (
+		id VARCHAR(64) PRIMARY KEY,
+		olt_id VARCHAR(64) NOT NULL REFERENCES network_olts(id) ON DELETE CASCADE,
+		slot_number INT NOT NULL DEFAULT 1,
+		name VARCHAR(150) NOT NULL,
+		card_type VARCHAR(100) DEFAULT '',
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS network_pons (
+		id VARCHAR(64) PRIMARY KEY,
+		slot_id VARCHAR(64) NOT NULL REFERENCES network_slots(id) ON DELETE CASCADE,
+		olt_id VARCHAR(64) NOT NULL,
+		pon_number INT NOT NULL DEFAULT 1,
+		name VARCHAR(150) NOT NULL,
+		sfp_type VARCHAR(50) DEFAULT '',
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS network_ctos (
+		id VARCHAR(64) PRIMARY KEY,
+		pon_id VARCHAR(64) NOT NULL REFERENCES network_pons(id) ON DELETE CASCADE,
+		slot_id VARCHAR(64) NOT NULL,
+		olt_id VARCHAR(64) NOT NULL,
+		name VARCHAR(150) NOT NULL,
+		splitter_ratio VARCHAR(32) DEFAULT '1:16',
+		total_ports INT DEFAULT 16,
+		address TEXT DEFAULT '',
+		coordinates VARCHAR(100) DEFAULT '',
+		notes TEXT DEFAULT '',
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_network_slots_olt ON network_slots(olt_id);
+	CREATE INDEX IF NOT EXISTS idx_network_pons_slot ON network_pons(slot_id);
+	CREATE INDEX IF NOT EXISTS idx_network_pons_olt ON network_pons(olt_id);
+	CREATE INDEX IF NOT EXISTS idx_network_ctos_pon ON network_ctos(pon_id);
+	CREATE INDEX IF NOT EXISTS idx_network_ctos_olt ON network_ctos(olt_id);
+
+	CREATE TABLE IF NOT EXISTS conversations (
+		id VARCHAR(64) PRIMARY KEY,
+		client_id VARCHAR(64) NOT NULL,
+		client_name VARCHAR(150) NOT NULL,
+		contact_name VARCHAR(150) DEFAULT '',
+		cpf_cnpj VARCHAR(32) DEFAULT '',
+		department VARCHAR(100) DEFAULT '',
+		status VARCHAR(32) NOT NULL DEFAULT 'waiting',
+		operator_id VARCHAR(64) DEFAULT '',
+		operator_name VARCHAR(150) DEFAULT '',
+		olt VARCHAR(100) DEFAULT '',
+		pon VARCHAR(100) DEFAULT '',
+		cto VARCHAR(100) DEFAULT '',
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status);
+	CREATE INDEX IF NOT EXISTS idx_conversations_client ON conversations(client_id);
+	CREATE INDEX IF NOT EXISTS idx_conversations_cpf ON conversations(cpf_cnpj);
+	CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+
+	CREATE TABLE IF NOT EXISTS messages (
+		id VARCHAR(64) PRIMARY KEY,
+		conversation_id VARCHAR(64) NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+		sender_id VARCHAR(64) NOT NULL,
+		sender_type VARCHAR(32) NOT NULL,
+		sender_name VARCHAR(150) NOT NULL,
+		content TEXT NOT NULL,
+		timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		status VARCHAR(32) NOT NULL DEFAULT 'delivered'
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+	CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp ASC);
 	`
 
 	if _, err := db.Exec(query); err != nil {
@@ -74,6 +189,11 @@ func (db *DB) runMigrations() error {
 	// Semeia configurações padrões (mensagem de encerramento e fluxo visual)
 	if err := db.seedDefaultSettings(); err != nil {
 		return err
+	}
+
+	// Semeia rede FTTH padrão se estiver vazia
+	if err := db.seedDefaultNetwork(); err != nil {
+		log.Println("⚠️ Aviso ao semear rede padrão:", err)
 	}
 
 	// Semeia o Administrador Geral padrão se não houver usuários cadastrados
@@ -565,5 +685,594 @@ func (db *DB) SaveRBXConfig(cfg *models.RBXConfig) error {
 	_, err = db.Exec(query, bytes)
 	return err
 }
+
+// SaveCustomerNetwork persiste OLT, PON e CTO para um CPF
+func (db *DB) SaveCustomerNetwork(cpfCnpj, olt, pon, cto string) error {
+	clean := strings.TrimSpace(cpfCnpj)
+	if clean == "" {
+		return nil
+	}
+	query := `
+	INSERT INTO customer_network (cpf_cnpj, olt, pon, cto, updated_at)
+	VALUES ($1, $2, $3, $4, NOW())
+	ON CONFLICT (cpf_cnpj) DO UPDATE
+	SET olt = EXCLUDED.olt, pon = EXCLUDED.pon, cto = EXCLUDED.cto, updated_at = NOW()
+	`
+	_, err := db.Exec(query, clean, strings.TrimSpace(olt), strings.TrimSpace(pon), strings.TrimSpace(cto))
+	return err
+}
+
+// GetCustomerNetwork busca OLT, PON e CTO salvas para um CPF
+func (db *DB) GetCustomerNetwork(cpfCnpj string) (string, string, string, error) {
+	clean := strings.TrimSpace(cpfCnpj)
+	if clean == "" {
+		return "", "", "", nil
+	}
+	query := `SELECT olt, pon, cto FROM customer_network WHERE cpf_cnpj = $1`
+	var olt, pon, cto string
+	err := db.QueryRow(query, clean).Scan(&olt, &pon, &cto)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", "", "", nil
+		}
+		return "", "", "", err
+	}
+	return olt, pon, cto, nil
+}
+
+// UpsertDevice salva ou atualiza o aparelho móvel com OLT, PON e CTO
+func (db *DB) UpsertDevice(dev *models.DeviceRegistration) error {
+	if dev.DeviceID == "" {
+		return nil
+	}
+	query := `
+	INSERT INTO devices (device_id, cpf_cnpj, client_name, platform, push_token, app_version, olt, pon, cto, rbx_group, last_seen_at, created_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	ON CONFLICT (device_id) DO UPDATE
+	SET cpf_cnpj = CASE WHEN EXCLUDED.cpf_cnpj != '' THEN EXCLUDED.cpf_cnpj ELSE devices.cpf_cnpj END,
+	    client_name = CASE WHEN EXCLUDED.client_name != '' THEN EXCLUDED.client_name ELSE devices.client_name END,
+	    platform = CASE WHEN EXCLUDED.platform != '' THEN EXCLUDED.platform ELSE devices.platform END,
+	    push_token = CASE WHEN EXCLUDED.push_token != '' THEN EXCLUDED.push_token ELSE devices.push_token END,
+	    app_version = CASE WHEN EXCLUDED.app_version != '' THEN EXCLUDED.app_version ELSE devices.app_version END,
+	    olt = CASE WHEN EXCLUDED.olt != '' THEN EXCLUDED.olt ELSE devices.olt END,
+	    pon = CASE WHEN EXCLUDED.pon != '' THEN EXCLUDED.pon ELSE devices.pon END,
+	    cto = CASE WHEN EXCLUDED.cto != '' THEN EXCLUDED.cto ELSE devices.cto END,
+	    rbx_group = CASE WHEN EXCLUDED.rbx_group != '' THEN EXCLUDED.rbx_group ELSE devices.rbx_group END,
+	    last_seen_at = EXCLUDED.last_seen_at
+	`
+	_, err := db.Exec(query,
+		dev.DeviceID,
+		dev.CpfCnpj,
+		dev.ClientName,
+		dev.Platform,
+		dev.PushToken,
+		dev.AppVersion,
+		dev.OLT,
+		dev.PON,
+		dev.CTO,
+		dev.RbxGroup,
+		dev.LastSeenAt,
+		dev.CreatedAt,
+	)
+	return err
+}
+
+// ListDevices lista os aparelhos registrados salvos no PostgreSQL
+func (db *DB) ListDevices() ([]*models.DeviceRegistration, error) {
+	query := `
+	SELECT device_id, cpf_cnpj, client_name, platform, push_token, app_version, olt, pon, cto, rbx_group, last_seen_at, created_at
+	FROM devices
+	ORDER BY last_seen_at DESC
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]*models.DeviceRegistration, 0)
+	for rows.Next() {
+		var dev models.DeviceRegistration
+		err := rows.Scan(
+			&dev.DeviceID,
+			&dev.CpfCnpj,
+			&dev.ClientName,
+			&dev.Platform,
+			&dev.PushToken,
+			&dev.AppVersion,
+			&dev.OLT,
+			&dev.PON,
+			&dev.CTO,
+			&dev.RbxGroup,
+			&dev.LastSeenAt,
+			&dev.CreatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, &dev)
+	}
+	return list, nil
+}
+
+// seedDefaultNetwork cria infraestrutura inicial de exemplo se a tabela de OLTs estiver vazia
+func (db *DB) seedDefaultNetwork() error {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM network_olts").Scan(&count)
+	if err != nil || count > 0 {
+		return err
+	}
+
+	oltID := "olt-central-01"
+	slotID := "slot-central-01"
+	ponID := "pon-central-01"
+
+	// 1. OLT
+	_, err = db.Exec(`
+		INSERT INTO network_olts (id, name, model, ip, location, description, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+	`, oltID, "OLT-CENTRAL-01", "Huawei SmartAX MA5608T", "10.0.10.1", "POP Central", "OLT principal de distribuição urbana")
+	if err != nil {
+		return err
+	}
+
+	// 2. SLOT
+	_, err = db.Exec(`
+		INSERT INTO network_slots (id, olt_id, slot_number, name, card_type, created_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+	`, slotID, oltID, 1, "Slot 01 - GPFD", "Huawei GPFD 16P")
+	if err != nil {
+		return err
+	}
+
+	// 3. PON
+	_, err = db.Exec(`
+		INSERT INTO network_pons (id, slot_id, olt_id, pon_number, name, sfp_type, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+	`, ponID, slotID, oltID, 1, "PON 1/1", "Class C++ (7.5dBm)")
+	if err != nil {
+		return err
+	}
+
+	// 4. CTOs
+	_, _ = db.Exec(`
+		INSERT INTO network_ctos (id, pon_id, slot_id, olt_id, name, splitter_ratio, total_ports, address, coordinates, notes, created_at)
+		VALUES 
+		('cto-01', $1, $2, $3, 'CTO-01', '1:16', 16, 'Av. Brasil, poste 12 - Centro', '-1.2345, -48.1234', 'Caixa primária de atendimento', NOW()),
+		('cto-02', $1, $2, $3, 'CTO-02', '1:16', 16, 'Rua das Flores, poste 08 - Centro', '-1.2350, -48.1240', 'Derivação secundária', NOW())
+	`, ponID, slotID, oltID)
+
+	log.Println("🌳 Infraestrutura FTTH inicial semeada com sucesso no PostgreSQL!")
+	return nil
+}
+
+// GetNetworkTree retorna a árvore completa de OLTs -> Slots -> PONs -> CTOs
+func (db *DB) GetNetworkTree() ([]*models.NetworkOlt, error) {
+	// 1. Busca todas as OLTs
+	oltRows, err := db.Query(`
+		SELECT id, name, model, ip, location, description, created_at, updated_at
+		FROM network_olts
+		ORDER BY name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao consultar OLTs: %w", err)
+	}
+	defer oltRows.Close()
+
+	olts := make([]*models.NetworkOlt, 0)
+	oltMap := make(map[string]*models.NetworkOlt)
+
+	for oltRows.Next() {
+		o := &models.NetworkOlt{}
+		if err := oltRows.Scan(&o.ID, &o.Name, &o.Model, &o.IP, &o.Location, &o.Description, &o.CreatedAt, &o.UpdatedAt); err != nil {
+			return nil, err
+		}
+		o.Slots = make([]*models.NetworkSlot, 0)
+		olts = append(olts, o)
+		oltMap[o.ID] = o
+	}
+
+	// 2. Busca todos os Slots
+	slotRows, err := db.Query(`
+		SELECT id, olt_id, slot_number, name, card_type, created_at
+		FROM network_slots
+		ORDER BY slot_number ASC, name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao consultar Slots: %w", err)
+	}
+	defer slotRows.Close()
+
+	slotMap := make(map[string]*models.NetworkSlot)
+	for slotRows.Next() {
+		s := &models.NetworkSlot{}
+		if err := slotRows.Scan(&s.ID, &s.OltID, &s.SlotNumber, &s.Name, &s.CardType, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		s.Pons = make([]*models.NetworkPon, 0)
+		slotMap[s.ID] = s
+		if parentOlt, ok := oltMap[s.OltID]; ok {
+			parentOlt.Slots = append(parentOlt.Slots, s)
+		}
+	}
+
+	// 3. Busca todas as PONs
+	ponRows, err := db.Query(`
+		SELECT id, slot_id, olt_id, pon_number, name, sfp_type, created_at
+		FROM network_pons
+		ORDER BY pon_number ASC, name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao consultar PONs: %w", err)
+	}
+	defer ponRows.Close()
+
+	ponMap := make(map[string]*models.NetworkPon)
+	for ponRows.Next() {
+		p := &models.NetworkPon{}
+		if err := ponRows.Scan(&p.ID, &p.SlotID, &p.OltID, &p.PonNumber, &p.Name, &p.SfpType, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		p.Ctos = make([]*models.NetworkCto, 0)
+		ponMap[p.ID] = p
+		if parentSlot, ok := slotMap[p.SlotID]; ok {
+			parentSlot.Pons = append(parentSlot.Pons, p)
+		}
+	}
+
+	// 4. Busca todas as CTOs
+	ctoRows, err := db.Query(`
+		SELECT id, pon_id, slot_id, olt_id, name, splitter_ratio, total_ports, address, coordinates, notes, created_at
+		FROM network_ctos
+		ORDER BY name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao consultar CTOs: %w", err)
+	}
+	defer ctoRows.Close()
+
+	for ctoRows.Next() {
+		c := &models.NetworkCto{}
+		if err := ctoRows.Scan(&c.ID, &c.PonID, &c.SlotID, &c.OltID, &c.Name, &c.SplitterRatio, &c.TotalPorts, &c.Address, &c.Coordinates, &c.Notes, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		if parentPon, ok := ponMap[c.PonID]; ok {
+			parentPon.Ctos = append(parentPon.Ctos, c)
+		}
+	}
+
+	return olts, nil
+}
+
+// CreateOlt cadastra uma nova OLT
+func (db *DB) CreateOlt(olt *models.NetworkOlt) error {
+	query := `
+		INSERT INTO network_olts (id, name, model, ip, location, description, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+	_, err := db.Exec(query, olt.ID, olt.Name, olt.Model, olt.IP, olt.Location, olt.Description, olt.CreatedAt, olt.UpdatedAt)
+	return err
+}
+
+// UpdateOlt atualiza dados de uma OLT
+func (db *DB) UpdateOlt(olt *models.NetworkOlt) error {
+	query := `
+		UPDATE network_olts
+		SET name = $1, model = $2, ip = $3, location = $4, description = $5, updated_at = NOW()
+		WHERE id = $6
+	`
+	_, err := db.Exec(query, olt.Name, olt.Model, olt.IP, olt.Location, olt.Description, olt.ID)
+	return err
+}
+
+// DeleteOlt remove uma OLT (em cascata no banco)
+func (db *DB) DeleteOlt(id string) error {
+	_, err := db.Exec("DELETE FROM network_olts WHERE id = $1", id)
+	return err
+}
+
+// CreateSlot cadastra um novo Slot de placa PON
+func (db *DB) CreateSlot(slot *models.NetworkSlot) error {
+	query := `
+		INSERT INTO network_slots (id, olt_id, slot_number, name, card_type, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	_, err := db.Exec(query, slot.ID, slot.OltID, slot.SlotNumber, slot.Name, slot.CardType, slot.CreatedAt)
+	return err
+}
+
+// UpdateSlot atualiza dados de um Slot
+func (db *DB) UpdateSlot(slot *models.NetworkSlot) error {
+	query := `
+		UPDATE network_slots
+		SET slot_number = $1, name = $2, card_type = $3
+		WHERE id = $4
+	`
+	_, err := db.Exec(query, slot.SlotNumber, slot.Name, slot.CardType, slot.ID)
+	return err
+}
+
+// DeleteSlot remove um Slot (em cascata no banco)
+func (db *DB) DeleteSlot(id string) error {
+	_, err := db.Exec("DELETE FROM network_slots WHERE id = $1", id)
+	return err
+}
+
+// CreatePon cadastra uma nova porta PON
+func (db *DB) CreatePon(pon *models.NetworkPon) error {
+	query := `
+		INSERT INTO network_pons (id, slot_id, olt_id, pon_number, name, sfp_type, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`
+	_, err := db.Exec(query, pon.ID, pon.SlotID, pon.OltID, pon.PonNumber, pon.Name, pon.SfpType, pon.CreatedAt)
+	return err
+}
+
+// UpdatePon atualiza dados de uma porta PON
+func (db *DB) UpdatePon(pon *models.NetworkPon) error {
+	query := `
+		UPDATE network_pons
+		SET pon_number = $1, name = $2, sfp_type = $3
+		WHERE id = $4
+	`
+	_, err := db.Exec(query, pon.PonNumber, pon.Name, pon.SfpType, pon.ID)
+	return err
+}
+
+// DeletePon remove uma porta PON (em cascata no banco)
+func (db *DB) DeletePon(id string) error {
+	_, err := db.Exec("DELETE FROM network_pons WHERE id = $1", id)
+	return err
+}
+
+// GetPon busca uma porta PON por ID
+func (db *DB) GetPon(id string) (*models.NetworkPon, error) {
+	query := `SELECT id, slot_id, olt_id, pon_number, name, sfp_type, created_at FROM network_pons WHERE id = $1`
+	var p models.NetworkPon
+	err := db.QueryRow(query, id).Scan(&p.ID, &p.SlotID, &p.OltID, &p.PonNumber, &p.Name, &p.SfpType, &p.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// CreateCto cadastra uma nova CTO pertencente a uma PON (autoresolve slot_id e olt_id se omitidos)
+func (db *DB) CreateCto(cto *models.NetworkCto) error {
+	if cto.SlotID == "" || cto.OltID == "" {
+		if pon, err := db.GetPon(cto.PonID); err == nil && pon != nil {
+			cto.SlotID = pon.SlotID
+			cto.OltID = pon.OltID
+		}
+	}
+	query := `
+		INSERT INTO network_ctos (id, pon_id, slot_id, olt_id, name, splitter_ratio, total_ports, address, coordinates, notes, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+	_, err := db.Exec(query, cto.ID, cto.PonID, cto.SlotID, cto.OltID, cto.Name, cto.SplitterRatio, cto.TotalPorts, cto.Address, cto.Coordinates, cto.Notes, cto.CreatedAt)
+	return err
+}
+
+// CreateCtosBatch cadastra múltiplas CTOs em lote para uma PON
+func (db *DB) CreateCtosBatch(ctos []*models.NetworkCto) error {
+	if len(ctos) == 0 {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO network_ctos (id, pon_id, slot_id, olt_id, name, splitter_ratio, total_ports, address, coordinates, notes, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, cto := range ctos {
+		_, err := stmt.Exec(cto.ID, cto.PonID, cto.SlotID, cto.OltID, cto.Name, cto.SplitterRatio, cto.TotalPorts, cto.Address, cto.Coordinates, cto.Notes, cto.CreatedAt)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// UpdateCto atualiza dados de uma CTO
+func (db *DB) UpdateCto(cto *models.NetworkCto) error {
+	query := `
+		UPDATE network_ctos
+		SET name = $1, splitter_ratio = $2, total_ports = $3, address = $4, coordinates = $5, notes = $6
+		WHERE id = $7
+	`
+	_, err := db.Exec(query, cto.Name, cto.SplitterRatio, cto.TotalPorts, cto.Address, cto.Coordinates, cto.Notes, cto.ID)
+	return err
+}
+
+// DeleteCto remove uma CTO
+func (db *DB) DeleteCto(id string) error {
+	_, err := db.Exec("DELETE FROM network_ctos WHERE id = $1", id)
+	return err
+}
+
+// ==========================================
+// PERSISTÊNCIA DE CONVERSAS E MENSAGENS (CHAT)
+// ==========================================
+
+// UpsertConversation salva ou atualiza uma conversa no PostgreSQL
+func (db *DB) UpsertConversation(conv *models.Conversation) error {
+	if conv == nil || conv.ID == "" {
+		return nil
+	}
+	opID := ""
+	opName := ""
+	if conv.Operator != nil {
+		opID = conv.Operator.ID
+		opName = conv.Operator.Name
+	}
+	query := `
+	INSERT INTO conversations (
+		id, client_id, client_name, contact_name, cpf_cnpj, department, status,
+		operator_id, operator_name, olt, pon, cto, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	ON CONFLICT (id) DO UPDATE SET
+		client_name = EXCLUDED.client_name,
+		contact_name = EXCLUDED.contact_name,
+		cpf_cnpj = CASE WHEN EXCLUDED.cpf_cnpj != '' THEN EXCLUDED.cpf_cnpj ELSE conversations.cpf_cnpj END,
+		department = EXCLUDED.department,
+		status = EXCLUDED.status,
+		operator_id = EXCLUDED.operator_id,
+		operator_name = EXCLUDED.operator_name,
+		olt = CASE WHEN EXCLUDED.olt != '' THEN EXCLUDED.olt ELSE conversations.olt END,
+		pon = CASE WHEN EXCLUDED.pon != '' THEN EXCLUDED.pon ELSE conversations.pon END,
+		cto = CASE WHEN EXCLUDED.cto != '' THEN EXCLUDED.cto ELSE conversations.cto END,
+		updated_at = EXCLUDED.updated_at;
+	`
+	_, err := db.Exec(query,
+		conv.ID, conv.ClientID, conv.ClientName, conv.ContactName, conv.CpfCnpj,
+		conv.Department, string(conv.Status), opID, opName,
+		conv.OLT, conv.PON, conv.CTO, conv.CreatedAt, conv.UpdatedAt,
+	)
+	return err
+}
+
+// GetConversationByID busca uma conversa específica no banco
+func (db *DB) GetConversationByID(id string) (*models.Conversation, error) {
+	query := `
+	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, status,
+	       operator_id, operator_name, olt, pon, cto, created_at, updated_at
+	FROM conversations WHERE id = $1;
+	`
+	var conv models.Conversation
+	var opID, opName, statusStr string
+	err := db.QueryRow(query, id).Scan(
+		&conv.ID, &conv.ClientID, &conv.ClientName, &conv.ContactName, &conv.CpfCnpj,
+		&conv.Department, &statusStr, &opID, &opName, &conv.OLT, &conv.PON, &conv.CTO,
+		&conv.CreatedAt, &conv.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	conv.Status = models.ConversationStatus(statusStr)
+	if opID != "" || opName != "" {
+		conv.Operator = &models.OperatorInfo{
+			ID:   opID,
+			Name: opName,
+		}
+	}
+	return &conv, nil
+}
+
+// ListConversations retorna todas as conversas do banco, com filtros opcionais de status e CPF/CNPJ
+func (db *DB) ListConversations(status models.ConversationStatus, cpfCnpj string) ([]*models.Conversation, error) {
+	query := `
+	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, status,
+	       operator_id, operator_name, olt, pon, cto, created_at, updated_at
+	FROM conversations
+	WHERE ($1 = '' OR status = $1)
+	  AND ($2 = '' OR cpf_cnpj = $2)
+	ORDER BY updated_at DESC;
+	`
+	rows, err := db.Query(query, string(status), strings.TrimSpace(cpfCnpj))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]*models.Conversation, 0)
+	for rows.Next() {
+		var conv models.Conversation
+		var opID, opName, statusStr string
+		err := rows.Scan(
+			&conv.ID, &conv.ClientID, &conv.ClientName, &conv.ContactName, &conv.CpfCnpj,
+			&conv.Department, &statusStr, &opID, &opName, &conv.OLT, &conv.PON, &conv.CTO,
+			&conv.CreatedAt, &conv.UpdatedAt,
+		)
+		if err != nil {
+			continue
+		}
+		conv.Status = models.ConversationStatus(statusStr)
+		if opID != "" || opName != "" {
+			conv.Operator = &models.OperatorInfo{
+				ID:   opID,
+				Name: opName,
+			}
+		}
+		list = append(list, &conv)
+	}
+	return list, nil
+}
+
+// SaveMessage persiste a mensagem do chat no PostgreSQL
+func (db *DB) SaveMessage(msg *models.Message) error {
+	if msg == nil || msg.ID == "" || msg.ConversationID == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, msg.Timestamp)
+	if err != nil {
+		t = time.Now().UTC()
+	}
+	query := `
+	INSERT INTO messages (id, conversation_id, sender_id, sender_type, sender_name, content, timestamp, status)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	ON CONFLICT (id) DO NOTHING;
+	`
+	_, err = db.Exec(query,
+		msg.ID, msg.ConversationID, msg.SenderID, string(msg.SenderType),
+		msg.SenderName, msg.Content, t, string(msg.Status),
+	)
+	return err
+}
+
+// GetMessagesByConversation busca mensagens ordenadas do banco de dados
+func (db *DB) GetMessagesByConversation(convID string, limit int) ([]*models.Message, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	query := `
+	SELECT id, conversation_id, sender_id, sender_type, sender_name, content, timestamp, status
+	FROM messages
+	WHERE conversation_id = $1
+	ORDER BY timestamp ASC
+	LIMIT $2;
+	`
+	rows, err := db.Query(query, convID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	msgs := make([]*models.Message, 0)
+	for rows.Next() {
+		var msg models.Message
+		var sTypeStr, statusStr string
+		var t time.Time
+		err := rows.Scan(
+			&msg.ID, &msg.ConversationID, &msg.SenderID, &sTypeStr,
+			&msg.SenderName, &msg.Content, &t, &statusStr,
+		)
+		if err != nil {
+			continue
+		}
+		msg.SenderType = models.SenderType(sTypeStr)
+		msg.Status = models.MessageStatus(statusStr)
+		msg.Timestamp = t.Format(time.RFC3339)
+		msgs = append(msgs, &msg)
+	}
+	return msgs, nil
+}
+
+// ResetConversationsAndMessages limpa todo o histórico de conversas do banco
+func (db *DB) ResetConversationsAndMessages() error {
+	_, err := db.Exec("DELETE FROM conversations;")
+	return err
+}
+
+
 
 

@@ -37,3 +37,6 @@ bin/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Storage temporário de arquivos (ex: boletos com expiração de 1h)
+server/storage/

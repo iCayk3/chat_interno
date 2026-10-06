@@ -37,17 +37,20 @@ func main() {
 	defer db.Close()
 
 	// 3. Inicializa serviços centrais
-	chatService := services.NewChatService()
+	chatService := services.NewChatService(db)
 	extService := services.NewExternalAPIService()
 	authService := services.NewAuthService(db, cfg.JWTSecret)
 	rbxService := services.NewRBXService(db)
+	fileService := services.NewFileService("storage/temp_boletos")
+	campaignService := services.NewCampaignService(db, rbxService)
+	networkService := services.NewNetworkService(db)
 
 	// 3. Inicializa e roda o Hub WebSocket
 	hub := websocket.NewHub(chatService)
 	go hub.Run()
 
 	// 4. Inicializa handlers e limitadores
-	h := handlers.NewHandler(chatService, extService, authService, rbxService, db, hub, cfg.AllowedOrigins)
+	h := handlers.NewHandler(chatService, extService, authService, rbxService, fileService, campaignService, networkService, db, hub, cfg.AllowedOrigins)
 	rateLimiter := middleware.NewIPRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst)
 
 	// 5. Configura roteador Chi com middlewares de segurança
@@ -80,13 +83,14 @@ func main() {
 	})
 
 	r.Route("/api/conversations", func(r chi.Router) {
-		r.Post("/", h.HandleCreateConversation)         // Iniciar novo atendimento
-		r.Get("/", h.HandleListConversations)           // Listar atendimentos (para painel operador)
-		r.Post("/reset", h.HandleResetAll)              // Encerra e limpa todo o histórico para testes do zero
-		r.Get("/{id}", h.HandleGetConversation)         // Detalhes do atendimento
-		r.Get("/{id}/messages", h.HandleGetMessages)    // Histórico de mensagens
-		r.Post("/{id}/assign", h.HandleAssignOperator)  // Operador assume atendimento
-		r.Post("/{id}/close", h.HandleCloseConversation)// Encerramento do atendimento
+		r.Post("/", h.HandleCreateConversation)                // Iniciar novo atendimento
+		r.Get("/", h.HandleListConversations)                  // Listar atendimentos (para painel operador)
+		r.Post("/reset", h.HandleResetAll)                     // Encerra e limpa todo o histórico para testes do zero
+		r.Get("/{id}", h.HandleGetConversation)                // Detalhes do atendimento
+		r.Get("/{id}/messages", h.HandleGetMessages)           // Histórico de mensagens
+		r.Put("/{id}/network", h.HandleUpdateConversationNetwork) // Atualiza OLT, PON e CTO
+		r.Post("/{id}/assign", h.HandleAssignOperator)         // Operador assume atendimento
+		r.Post("/{id}/close", h.HandleCloseConversation)       // Encerramento do atendimento
 	})
 
 	// Configurações do Chat, Mensagens de Encerramento e Fluxo Visual do Bot
@@ -95,17 +99,69 @@ func main() {
 		r.Put("/", h.HandleSaveSettings)
 	})
 
+	// Registro de Dispositivos Móveis dos Clientes
+	r.Route("/api/devices", func(r chi.Router) {
+		r.Post("/register", h.HandleRegisterDevice)
+		r.Get("/", h.HandleListDevices)
+	})
+
+	// Campanhas e Disparos em Massa (Web Operador/Gestor)
+	r.Route("/api/campaigns", func(r chi.Router) {
+		r.Get("/", h.HandleListCampaigns)
+		r.Post("/", h.HandleSaveCampaign)
+		r.Post("/{id}/dispatch", h.HandleDispatchCampaign)
+	})
+
+	// Notificações Recebidas pelos Clientes no App
+	r.Route("/api/notifications", func(r chi.Router) {
+		r.Get("/client", h.HandleGetClientNotifications)
+		r.Post("/{id}/read", h.HandleMarkNotificationRead)
+		r.Post("/{id}/start-chat", h.HandleStartChatFromNotification)
+	})
+
 	// Integração ERP RBXSoft ISP (V1 e V2)
 	r.Route("/api/erp/rbx", func(r chi.Router) {
 		r.Get("/customer", h.HandleRBXCustomerLookup)
 		r.Get("/financial", h.HandleRBXFinancial)
+		r.Get("/groups", h.HandleRBXGetGroups)                    // Consulta Grupos de Clientes do RBX
+		r.Get("/groups/{code}/clients", h.HandleRBXGetGroupClients) // Consulta Clientes por Grupo no RBX
 		r.Post("/pix", h.HandleRBXPix)
+		r.Post("/qrcode", h.HandleRBXQRCode)
 		r.Post("/boleto", h.HandleRBXBoleto)
+		r.Post("/boleto/send", h.HandleSendRBXBoleto)
 		r.Post("/promessa", h.HandleRBXPromessa)
 		r.Get("/config", h.HandleRBXGetConfig)
 		r.Put("/config", h.HandleRBXSaveConfig)
 		r.Post("/test", h.HandleRBXTestConnection)
 	})
+
+	// Gestão de Rede FTTH (OLTs -> Slots -> PONs -> CTOs)
+	r.Route("/api/network", func(r chi.Router) {
+		r.Get("/tree", h.HandleGetNetworkTree)
+		r.Post("/olts", h.HandleCreateOlt)
+		r.Put("/olts/{id}", h.HandleUpdateOlt)
+		r.Delete("/olts/{id}", h.HandleDeleteOlt)
+
+		r.Post("/slots", h.HandleCreateSlot)
+		r.Put("/slots/{id}", h.HandleUpdateSlot)
+		r.Delete("/slots/{id}", h.HandleDeleteSlot)
+
+		r.Post("/pons", h.HandleCreatePon)
+		r.Put("/pons/{id}", h.HandleUpdatePon)
+		r.Delete("/pons/{id}", h.HandleDeletePon)
+
+		r.Post("/ctos", h.HandleCreateCto)
+		r.Post("/ctos/batch", h.HandleCreateCtosBatch)
+		r.Put("/ctos/{id}", h.HandleUpdateCto)
+		r.Delete("/ctos/{id}", h.HandleDeleteCto)
+
+		// Vínculo e consulta de OLT/PON/CTO por CPF do cliente
+		r.Get("/customer", h.HandleGetCustomerNetwork)
+		r.Put("/customer", h.HandleSaveCustomerNetwork)
+	})
+
+	// Download de arquivos temporários (boletos auto-excluídos após 1h)
+	r.Get("/api/files/boletos/{filename}", h.HandleServeBoletoFile)
 
 	// Consultas a APIs externas
 	r.Get("/api/customers/lookup", h.HandleCustomerLookup)

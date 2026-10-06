@@ -24,6 +24,9 @@ type Hub struct {
 	// Operadores online ouvindo fila e novas conversas
 	operators map[*Client]bool
 
+	// Todos os clientes e operadores conectados
+	allClients map[*Client]bool
+
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan *BroadcastEvent
@@ -36,6 +39,7 @@ func NewHub(chatService *services.ChatService) *Hub {
 	return &Hub{
 		rooms:       make(map[string]map[*Client]bool),
 		operators:   make(map[*Client]bool),
+		allClients:  make(map[*Client]bool),
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		broadcast:   make(chan *BroadcastEvent),
@@ -49,6 +53,8 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.mu.Lock()
+			h.allClients[client] = true
+
 			// Registra operador globalmente se aplicável
 			if client.SenderType == models.SenderOperator {
 				h.operators[client] = true
@@ -66,6 +72,8 @@ func (h *Hub) Run() {
 
 		case client := <-h.unregister:
 			h.mu.Lock()
+			delete(h.allClients, client)
+
 			if client.SenderType == models.SenderOperator {
 				delete(h.operators, client)
 			}
@@ -170,6 +178,47 @@ func (h *Hub) JoinRoom(client *Client, conversationID string) {
 		h.rooms[conversationID][client] = true
 	}
 	log.Printf("[WS HUB] Cliente %s (%s) ingressou na sala: %s", client.SenderName, client.SenderType, conversationID)
+}
+
+// BroadcastAll envia um evento para todos os clientes conectados (usado em campanhas e notificações)
+func (h *Hub) BroadcastAll(action *models.WSAction) {
+	data, err := json.Marshal(action)
+	if err != nil {
+		return
+	}
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for client := range h.allClients {
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
+}
+
+// BroadcastToClientCpf envia notificação diretamente para os clientes conectados de um CPF específico
+func (h *Hub) BroadcastToClientCpf(cpf string, action *models.WSAction) {
+	if cpf == "" {
+		return
+	}
+	data, err := json.Marshal(action)
+	if err != nil {
+		return
+	}
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for client := range h.allClients {
+		if client.CpfCnpj == cpf {
+			select {
+			case client.Send <- data:
+			default:
+			}
+		}
+	}
 }
 
 

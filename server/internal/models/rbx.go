@@ -11,6 +11,7 @@ type RBXClient struct {
 	Numero            string `json:"numero"`
 	Bairro            string `json:"bairro"`
 	Cidade            string `json:"cidade"`
+	UF                string `json:"uf,omitempty"`
 	Cep               string `json:"cep"`
 	Email             string `json:"email"`
 	Telefone          string `json:"telefone"`
@@ -32,6 +33,7 @@ type RBXUnpaidDocument struct {
 	Historic       string  `json:"historic"`
 	Comments       string  `json:"comments,omitempty"`
 	PixCopiaCola   string  `json:"pixCopiaCola,omitempty"`
+	PixQRCode      string  `json:"pixQrCode,omitempty"`
 	BoletoLink     string  `json:"boletoLink,omitempty"`
 	Status         string  `json:"status"` // "aberto", "vencido", "hoje"
 }
@@ -56,3 +58,10 @@ type RBXConfig struct {
 	Enabled        bool   `json:"enabled"`
 	SimulationMode bool   `json:"simulationMode"`
 }
+
+// RBXCustomerGroup representa um grupo de clientes retornado por ConsultaGruposCliente
+type RBXCustomerGroup struct {
+	Codigo string `json:"codigo"`
+	Nome   string `json:"nome"`
+}
+

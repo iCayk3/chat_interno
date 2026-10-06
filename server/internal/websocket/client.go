@@ -34,6 +34,8 @@ type Client struct {
 	SenderID       string
 	SenderName     string
 	SenderType     models.SenderType
+	CpfCnpj        string
+	DeviceID       string
 	ChatService    *services.ChatService
 }
 
@@ -98,18 +100,50 @@ func (c *Client) handleAction(action *models.WSAction) {
 
 		// Validação e sincronização de salas por perfil
 		if c.SenderType == models.SenderOperator {
-			// Operadores podem transitar livremente entre salas de atendimento
+			// Regra de Negócio Mandatória: O operador só pode enviar mensagem após assumir o atendimento
+			conv, err := c.ChatService.GetConversation(targetConvID)
+			if err != nil || conv == nil {
+				log.Printf("[SECURITY] Atendimento %s não encontrado para envio de operador", targetConvID)
+				return
+			}
+			if conv.Status == models.ConvWaiting {
+				log.Printf("[SECURITY] Bloqueado: operador %s tentou enviar mensagem antes de assumir o atendimento %s", c.SenderName, targetConvID)
+				c.SendDirectAction("error", map[string]string{
+					"code":           "ATTENDANCE_NOT_ASSIGNED",
+					"conversationId": targetConvID,
+					"message":        "Você precisa assumir o atendimento antes de enviar mensagens ao cliente.",
+				})
+				return
+			}
+			if conv.Status == models.ConvClosed {
+				log.Printf("[SECURITY] Bloqueado: operador tentou enviar mensagem em atendimento finalizado %s", targetConvID)
+				return
+			}
+
+			// Operadores podem transitar livremente entre salas de atendimento ativas
 			if c.ConversationID != targetConvID {
 				c.Hub.JoinRoom(c, targetConvID)
 			}
 		} else {
-			// Clientes possuem validação estrita (Anti-IDOR)
-			if c.ConversationID != "" && targetConvID != c.ConversationID {
-				log.Printf("[SECURITY] Tentativa de envio em sala não autorizada: %s por %s", targetConvID, c.SenderID)
-				return
-			}
-			if c.ConversationID == "" {
+			// Clientes: sincroniza sala no hub
+			if c.ConversationID != targetConvID {
 				c.Hub.JoinRoom(c, targetConvID)
+			}
+			// Se a conversa não existir no serviço, auto-cria e notifica todos os operadores na fila
+			if _, err := c.ChatService.GetConversation(targetConvID); err != nil {
+				newConv, _ := c.ChatService.CreateConversationWithID(targetConvID, models.StartChatRequest{
+					ClientID:    c.SenderID,
+					ClientName:  c.SenderName,
+					ContactName: c.SenderName,
+					CpfCnpj:     c.CpfCnpj,
+					Department:  "Suporte Técnico",
+				})
+				if newConv != nil {
+					c.Hub.BroadcastToOperators(&models.WSAction{
+						Type:    "new_chat_waiting",
+						Payload: newConv,
+					})
+				}
 			}
 		}
 
@@ -140,12 +174,12 @@ func (c *Client) handleAction(action *models.WSAction) {
 			Payload: msg,
 		}, c)
 
-		// Notifica operadores de OUTRAS salas para atualizar a lista lateral (sem duplicar para quem já está na sala)
+		// Notifica operadores para atualizar chat e lista lateral em tempo real
 		if c.SenderType == models.SenderClient {
 			c.Hub.BroadcastToOperators(&models.WSAction{
 				Type:    "message",
 				Payload: msg,
-			}, targetConvID)
+			})
 		}
 
 	case "typing":
@@ -166,6 +200,14 @@ func (c *Client) handleAction(action *models.WSAction) {
 
 		if targetConvID == "" {
 			return
+		}
+
+		// Operador só pode emitir digitação se o atendimento estiver ativo
+		if c.SenderType == models.SenderOperator {
+			conv, err := c.ChatService.GetConversation(targetConvID)
+			if err != nil || conv == nil || conv.Status != models.ConvActive {
+				return
+			}
 		}
 
 		typing.ConversationID = targetConvID
@@ -191,9 +233,31 @@ func (c *Client) handleAction(action *models.WSAction) {
 		}
 		var joinPayload struct {
 			ConversationID string `json:"conversationId"`
+			Department     string `json:"department,omitempty"`
 		}
 		if err := json.Unmarshal(payloadBytes, &joinPayload); err == nil && joinPayload.ConversationID != "" {
 			c.Hub.JoinRoom(c, joinPayload.ConversationID)
+			if c.SenderType == models.SenderClient {
+				if _, err := c.ChatService.GetConversation(joinPayload.ConversationID); err != nil {
+					dept := joinPayload.Department
+					if dept == "" {
+						dept = "Suporte Técnico"
+					}
+					newConv, _ := c.ChatService.CreateConversationWithID(joinPayload.ConversationID, models.StartChatRequest{
+						ClientID:    c.SenderID,
+						ClientName:  c.SenderName,
+						ContactName: c.SenderName,
+						CpfCnpj:     c.CpfCnpj,
+						Department:  dept,
+					})
+				if newConv != nil {
+						c.Hub.BroadcastToOperators(&models.WSAction{
+							Type:    "new_chat_waiting",
+							Payload: newConv,
+						})
+					}
+				}
+			}
 		}
 	}
 }
@@ -227,5 +291,21 @@ func (c *Client) WritePump() {
 				return
 			}
 		}
+	}
+}
+
+// SendDirectAction envia uma ação diretamente para este cliente
+func (c *Client) SendDirectAction(actionType string, payload interface{}) {
+	act := &models.WSAction{
+		Type:    actionType,
+		Payload: payload,
+	}
+	bytes, err := json.Marshal(act)
+	if err != nil {
+		return
+	}
+	select {
+	case c.Send <- bytes:
+	default:
 	}
 }

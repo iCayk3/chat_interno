@@ -53,14 +53,19 @@ type OperatorInfo struct {
 
 // Conversation representa uma sessão de atendimento
 type Conversation struct {
-	ID         string             `json:"id"`
-	ClientID   string             `json:"clientId"`
-	ClientName string             `json:"clientName"`
-	Department string             `json:"department,omitempty"`
-	Status     ConversationStatus `json:"status"`
-	Operator   *OperatorInfo      `json:"operator,omitempty"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	UpdatedAt  time.Time          `json:"updatedAt"`
+	ID          string             `json:"id"`
+	ClientID    string             `json:"clientId"`
+	ClientName  string             `json:"clientName"`
+	ContactName string             `json:"contactName,omitempty"`
+	CpfCnpj     string             `json:"cpfCnpj,omitempty"`
+	Department    string             `json:"department,omitempty"`
+	OLT           string             `json:"olt,omitempty"`
+	PON           string             `json:"pon,omitempty"`
+	CTO           string             `json:"cto,omitempty"`
+	Status        ConversationStatus `json:"status"`
+	Operator      *OperatorInfo      `json:"operator,omitempty"`
+	CreatedAt     time.Time          `json:"createdAt"`
+	UpdatedAt     time.Time          `json:"updatedAt"`
 
 	// Dados internos não serializados para o cliente (Regra 7 de segurança)
 	InternalNotes string `json:"-"`
@@ -82,10 +87,12 @@ type TypingPayload struct {
 
 // StartChatRequest payload para iniciar conversa via REST
 type StartChatRequest struct {
-	ClientID   string `json:"clientId"`
-	ClientName string `json:"clientName"`
-	EmailOrDoc string `json:"emailOrDoc,omitempty"`
-	Department string `json:"department,omitempty"`
+	ClientID    string `json:"clientId"`
+	ClientName  string `json:"clientName"`
+	ContactName string `json:"contactName,omitempty"`
+	EmailOrDoc  string `json:"emailOrDoc,omitempty"`
+	CpfCnpj     string `json:"cpfCnpj,omitempty"`
+	Department  string `json:"department,omitempty"`
 }
 
 // SanitizeText limpa espaços em branco e evita injeção simples

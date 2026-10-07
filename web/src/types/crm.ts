@@ -7,6 +7,8 @@ export type CrmMenuId =
   | 'usuarios_gerencia'
   | 'empresa_atendentes'
   | 'empresa_departamentos'
+  | 'empresa_atendimentos'
+  | 'empresa_relatorios'
   | 'atendimento_canais'
   | 'atendimento_mensagens'
   | 'atendimento_automacoes'
@@ -307,4 +309,156 @@ export interface CreateCtosBatchRequest {
   address?: string;
   coordinates?: string;
   notes?: string;
+}
+
+// Modelos para Consulta de Atendimentos & Relatórios Gerenciais
+export interface ConversationItem {
+  id: string;
+  clientId: string;
+  clientName: string;
+  contactName?: string;
+  cpfCnpj?: string;
+  department: string;
+  status: 'waiting' | 'active' | 'closed';
+  operator?: {
+    id: string;
+    name: string;
+  };
+  olt?: string;
+  pon?: string;
+  cto?: string;
+  rbxGroup?: string;
+  assignedAt?: string;
+  closedAt?: string;
+  closedBy?: string;
+  closeReason?: string;
+  rating?: number;
+  ratingComment?: string;
+  ratedAt?: string;
+  channel?: 'mobile' | 'web' | 'telegram' | 'whatsapp_official' | 'whatsapp_evolution';
+  channelId?: string;
+  channelMeta?: Record<string, any>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SearchConversationsParams {
+  operatorId?: string;
+  department?: string;
+  rbxGroup?: string;
+  status?: string;
+  search?: string;
+  startDate?: string;
+  endDate?: string;
+  rating?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SearchConversationsResponse {
+  conversations: ConversationItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ConversationFullResponse {
+  conversation: ConversationItem;
+  messages: Array<{
+    id: string;
+    conversationId: string;
+    senderId: string;
+    senderType: 'client' | 'operator' | 'system';
+    senderName: string;
+    content: string;
+    timestamp: string;
+    status: string;
+  }>;
+}
+
+export interface DepartmentMetric {
+  department: string;
+  totalTickets: number;
+  avgTmaSeconds: number;
+  avgTmeSeconds: number;
+  avgRating: number;
+  ratedCount: number;
+}
+
+export interface OperatorMetric {
+  operatorId: string;
+  operatorName: string;
+  department: string;
+  totalTickets: number;
+  avgTmaSeconds: number;
+  avgTmeSeconds: number;
+  avgRating: number;
+  ratedCount: number;
+}
+
+export interface DailyVolumeMetric {
+  date: string;
+  totalTickets: number;
+  closedTickets: number;
+}
+
+export interface ReportSummaryResponse {
+  totalTickets: number;
+  closedTickets: number;
+  activeTickets: number;
+  waitingTickets: number;
+  avgTmaSeconds: number;
+  avgTmeSeconds: number;
+  avgRating: number;
+  totalRated: number;
+  ratingDistribution: Record<string, number>;
+  departments: DepartmentMetric[];
+  operators: OperatorMetric[];
+  dailyVolume: DailyVolumeMetric[];
+}
+
+// Configurações de Canais Omnichannel (Telegram, WhatsApp Oficial, WhatsApp Evolution)
+export interface TelegramConfig {
+  enabled: boolean;
+  botToken: string;
+  botName: string;
+  botUsername: string;
+  webhookUrl: string;
+  status: 'connected' | 'disconnected' | 'error';
+}
+
+export interface WhatsAppOfficialConfig {
+  enabled: boolean;
+  phoneNumberId: string;
+  wabaId: string;
+  accessToken: string;
+  verifyToken: string;
+  displayPhoneNumber: string;
+  status: 'connected' | 'disconnected' | 'error';
+}
+
+export interface WhatsAppEvolutionConfig {
+  enabled: boolean;
+  serverUrl: string;
+  apiKey: string;
+  instanceName: string;
+  webhookUrl: string;
+  status: 'connected' | 'disconnected' | 'error';
+}
+
+export interface ChannelsConfig {
+  telegram: TelegramConfig;
+  whatsappOfficial: WhatsAppOfficialConfig;
+  whatsappEvolution: WhatsAppEvolutionConfig;
+}
+
+export interface EvolutionInstance {
+  id?: string;
+  name: string;
+  connectionStatus: string;
+  ownerJid?: string;
+  profileName?: string;
+  profilePicUrl?: string;
+  integration?: string;
+  token?: string;
 }

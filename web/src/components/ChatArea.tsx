@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { Conversation, Message } from '../types/chat';
-import { Send, UserCheck, XCircle, MessageSquareOff, CheckCheck, Check, FileText, Download, Clock } from 'lucide-react';
+import { Send, UserCheck, XCircle, MessageSquareOff, CheckCheck, Check, FileText, Download, Clock, Smartphone, Globe, Radio, MessageSquare, Star } from 'lucide-react';
 
 interface ChatAreaProps {
   conversation: Conversation | null;
@@ -73,13 +73,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   };
 
   const renderMessageContent = (content: string, isOperator: boolean) => {
-    const boletoMatch = content.match(/(\/api\/files\/boletos\/[^\s\)]+)/);
+    const boletoMatch = content.match(/(\/api\/files\/boletos\/[^\s\)]+|https?:\/\/[^\s\)]+\.pdf[^\s\)]*)/i);
     if (!boletoMatch) {
       return <div className="break-words whitespace-pre-wrap">{content}</div>;
     }
 
     const fileUrl = boletoMatch[1];
-    const textPart = content.replace(/\[Baixar Boleto PDF\]\([^)]+\)/g, '').trim();
+    const textPart = content
+      .replace(/\[Baixar Boleto PDF\]\([^)]+\)/g, '')
+      .replace(/🔗 \*Link para baixar\/visualizar o Boleto \(PDF\):\*\s*https?:\/\/[^\s\)]+\.pdf[^\s\)]*/gi, '')
+      .trim();
 
     return (
       <div className="space-y-2.5">
@@ -168,10 +171,51 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </span>
               <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
                 conversation.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
-                conversation.status === 'waiting' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'
+                conversation.status === 'waiting' ? 'bg-amber-100 text-amber-700' :
+                conversation.status === 'waiting_rating' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-500'
               }`}>
-                {conversation.status === 'waiting' ? 'Aguardando' : conversation.status === 'active' ? 'Em Atendimento' : 'Finalizado'}
+                {conversation.status === 'waiting' ? 'Aguardando' :
+                 conversation.status === 'active' ? 'Em Atendimento' :
+                 conversation.status === 'waiting_rating' ? 'Aguardando Nota' : 'Finalizado'}
               </span>
+
+              {conversation.rating && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                  <Star className="w-2.5 h-2.5 fill-amber-400 text-amber-400" />
+                  <span>{conversation.rating}★</span>
+                </span>
+              )}
+
+              {conversation.channel === 'telegram' && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800" title="Canal: Telegram Bot">
+                  <Send className="w-2.5 h-2.5" />
+                  <span>Telegram</span>
+                </span>
+              )}
+              {conversation.channel === 'whatsapp_evolution' && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800" title="Canal: WhatsApp (Evolution)">
+                  <MessageSquare className="w-2.5 h-2.5" />
+                  <span>WhatsApp Evo</span>
+                </span>
+              )}
+              {conversation.channel === 'whatsapp_official' && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-900" title="Canal: WhatsApp Oficial Meta">
+                  <Radio className="w-2.5 h-2.5" />
+                  <span>WhatsApp Oficial</span>
+                </span>
+              )}
+              {conversation.channel === 'mobile' && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800" title="Canal: App Mobile SOL">
+                  <Smartphone className="w-2.5 h-2.5" />
+                  <span>App SOL</span>
+                </span>
+              )}
+              {conversation.channel === 'web' && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-800" title="Canal: Web Widget">
+                  <Globe className="w-2.5 h-2.5" />
+                  <span>Web Portal</span>
+                </span>
+              )}
             </h2>
             <p className="text-xs text-slate-500 truncate">
               {conversation.contactName && conversation.contactName !== conversation.clientName ? (
@@ -203,7 +247,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </button>
           )}
 
-          {conversation.status !== 'closed' && (
+          {conversation.status !== 'closed' && conversation.status !== 'waiting_rating' && (
             <button
               onClick={onCloseChat}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-medium text-xs transition-colors"
@@ -301,7 +345,31 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       <div className="p-4 bg-white border-t border-slate-200">
         {conversation.status === 'closed' ? (
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-center text-xs text-slate-500 font-medium">
-            Este atendimento foi encerrado. Nenhuma nova mensagem pode ser enviada.
+            <span>Este atendimento foi encerrado. Nenhuma nova mensagem pode ser enviada.</span>
+            {conversation.rating ? (
+              <span className="block mt-1 text-amber-600 font-semibold">
+                Avaliação do cliente: {conversation.rating} de 5 estrelas ⭐
+              </span>
+            ) : null}
+          </div>
+        ) : conversation.status === 'waiting_rating' ? (
+          <div className="p-3.5 bg-purple-50/90 border border-purple-200 rounded-xl flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-purple-100 border border-purple-200 flex items-center justify-center text-purple-700 shrink-0">
+                <Star className="w-5 h-5 text-purple-600 fill-purple-200" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="text-xs font-bold text-purple-900 truncate">
+                  Atendimento Finalizado pelo Operador
+                </h4>
+                <p className="text-[11px] text-purple-700 mt-0.5 leading-snug">
+                  Aguardando o cliente responder com uma nota de <strong>1 a 5</strong> no WhatsApp (expira automaticamente em 10 min).
+                </p>
+              </div>
+            </div>
+            <span className="text-[10px] font-semibold text-purple-600 bg-purple-100/70 px-2 py-1 rounded-md shrink-0 border border-purple-200">
+              Timeout 10 min
+            </span>
           </div>
         ) : conversation.status === 'waiting' ? (
           <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl flex items-center justify-between gap-4">

@@ -15,6 +15,7 @@ import { IntegracoesView } from './components/crm/IntegracoesView';
 import { AtendentesView } from './components/crm/AtendentesView';
 import { DepartamentosView } from './components/crm/DepartamentosView';
 import { RelatoriosView } from './components/crm/RelatoriosView';
+import { ConsultaAtendimentosView } from './components/crm/ConsultaAtendimentosView';
 import { MensagensRapidasView } from './components/crm/MensagensRapidasView';
 import { AuditoriaView } from './components/crm/AuditoriaView';
 import { CanaisView } from './components/crm/CanaisView';
@@ -26,6 +27,7 @@ import { UsuariosGerenciaView } from './components/crm/UsuariosGerenciaView';
 import { MeusDadosView } from './components/crm/MeusDadosView';
 import { ConfigRedeView } from './components/crm/ConfigRedeView';
 import { MeuPerfilModal } from './components/crm/MeuPerfilModal';
+import { NovoAtendimentoModal } from './components/chat/NovoAtendimentoModal';
 import { isSameDepartment } from './utils/rbac';
 
 export const App: React.FC = () => {
@@ -40,6 +42,7 @@ export const App: React.FC = () => {
   });
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isNovoAtendimentoOpen, setIsNovoAtendimentoOpen] = useState(false);
 
   // Chat & Helpdesk State
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -72,6 +75,25 @@ export const App: React.FC = () => {
     setMessages([]);
     operatorSocket.disconnect();
   };
+
+  // Validação proativa de sessão no mount e escuta para expiração de token (401)
+  useEffect(() => {
+    if (currentUser) {
+      api.getMe().catch((err) => {
+        console.warn('Sessão expirada ou inválida ao iniciar:', err);
+        handleLogout();
+      });
+    }
+
+    const handleAuthExpired = () => {
+      handleLogout();
+    };
+
+    window.addEventListener('auth:expired', handleAuthExpired);
+    return () => {
+      window.removeEventListener('auth:expired', handleAuthExpired);
+    };
+  }, []);
 
   // Carrega lista de conversas
   const loadConversations = async () => {
@@ -125,6 +147,7 @@ export const App: React.FC = () => {
     const unsubAction = operatorSocket.onAction((action) => {
       if (
         action.type === 'new_chat_waiting' ||
+        action.type === 'conversation_updated' ||
         action.type === 'operator_assigned' ||
         action.type === 'chat_closed'
       ) {
@@ -367,6 +390,10 @@ export const App: React.FC = () => {
       case 'empresa_departamentos':
         return <DepartamentosView userRole={userRole} currentUser={currentUser} />;
 
+      case 'empresa_atendimentos':
+        return <ConsultaAtendimentosView userRole={userRole} currentUser={currentUser} />;
+
+      case 'empresa_relatorios':
       case 'relatorios':
         return <RelatoriosView userRole={userRole} currentUser={currentUser} />;
 
@@ -427,6 +454,7 @@ export const App: React.FC = () => {
               onSearchChange={setSearchTerm}
               isConnected={isConnected}
               onResetAll={handleResetAll}
+              onOpenNewChat={() => setIsNovoAtendimentoOpen(true)}
               userRole={userRole}
               currentUser={currentUser}
             />
@@ -487,6 +515,19 @@ export const App: React.FC = () => {
         userRole={userRole}
         currentUser={currentUser}
         onLogout={handleLogout}
+      />
+
+      {/* Modal de Iniciar Atendimento Avulso (Outbound) */}
+      <NovoAtendimentoModal
+        isOpen={isNovoAtendimentoOpen}
+        onClose={() => setIsNovoAtendimentoOpen(false)}
+        currentUser={currentUser}
+        onSuccess={(newConv) => {
+          setConversations((prev) => [newConv, ...prev.filter((c) => c.id !== newConv.id)]);
+          setActiveTab('active');
+          setSelectedId(newConv.id);
+          setActiveMenu('atendimento_chat');
+        }}
       />
     </div>
   );

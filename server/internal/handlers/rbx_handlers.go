@@ -193,7 +193,11 @@ func (h *Handler) HandleRBXGetConfig(w http.ResponseWriter, r *http.Request) {
 // HandleRBXSaveConfig atualiza a configuração do RBX (Gestor e Admin)
 func (h *Handler) HandleRBXSaveConfig(w http.ResponseWriter, r *http.Request) {
 	user := h.extractAuthUser(r)
-	if user == nil || (user.Role != models.RoleAdmin && user.Role != models.RoleGestor) {
+	if user == nil {
+		h.respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "Sessão inválida ou expirada. Faça login novamente."})
+		return
+	}
+	if user.Role != models.RoleAdmin && user.Role != models.RoleGestor {
 		h.respondJSON(w, http.StatusForbidden, map[string]string{"error": "Acesso não autorizado"})
 		return
 	}
@@ -306,8 +310,16 @@ func (h *Handler) HandleSendRBXBoleto(w http.ResponseWriter, r *http.Request) {
 		histStr = "Documento a receber"
 	}
 
+	pdfLink := link
+	if pdfLink == "" {
+		pdfLink = fileURL
+	}
+
 	content := fmt.Sprintf("📄 Segue a 2ª via do seu boleto bancário:\n• Documento: #%s\n• Valor: R$ %s\n• Vencimento: %s\n• Referência: %s\n\n[Baixar Boleto PDF](%s)",
-		docNum, valStr, dueStr, histStr, fileURL)
+		docNum, valStr, dueStr, histStr, pdfLink)
+
+	whatsAppText := fmt.Sprintf("📄 *2ª Via do Boleto Bancário*\n• *Documento:* #%s\n• *Valor:* R$ %s\n• *Vencimento:* %s\n• *Referência:* %s\n\n🔗 *Link para baixar/visualizar o Boleto (PDF):*\n%s",
+		docNum, valStr, dueStr, histStr, pdfLink)
 
 	senderName := body.SenderName
 	if senderName == "" {
@@ -343,10 +355,57 @@ func (h *Handler) HandleSendRBXBoleto(w http.ResponseWriter, r *http.Request) {
 	h.hub.BroadcastToRoom(body.ConversationID, wsAction, nil)
 	h.hub.BroadcastToOperators(wsAction, body.ConversationID)
 
+	// 6. Despacha o boleto diretamente para o canal externo do cliente (WhatsApp ou Telegram)
+	if conv.Channel != "" && conv.Channel != "mobile" && conv.Channel != "web" {
+		go func(c *models.Conversation, msgText, directPdfLink, dNum, dDue string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[SEND BOLETO CHANNEL RECOVER]: %v", r)
+				}
+			}()
+
+			log.Printf("🚀 [BOLETO DISPATCH] Enviando boleto #%s para canal %s (%s)", dNum, c.Channel, c.ChannelID)
+
+			// Se for WhatsApp Evolution e tiver link direto do PDF
+			if c.Channel == "whatsapp_evolution" && directPdfLink != "" {
+				cfg, _ := h.channelService.GetChannelsConfig()
+				if cfg != nil && cfg.WhatsAppEvolution.Enabled {
+					inst := cfg.WhatsAppEvolution.InstanceName
+					if inst == "" {
+						inst = "solprovedorgroup"
+					}
+					caption := fmt.Sprintf("📄 Boleto Bancário #%s - Vencimento: %s", dNum, dDue)
+					fileName := fmt.Sprintf("boleto_%s.pdf", dNum)
+					err := h.channelService.SendEvolutionMedia(
+						cfg.WhatsAppEvolution.ServerURL,
+						cfg.WhatsAppEvolution.ApiKey,
+						inst,
+						c.ChannelID,
+						directPdfLink,
+						"application/pdf",
+						fileName,
+						caption,
+					)
+					if err != nil {
+						log.Printf("⚠️ [EVOLUTION MEDIA] Falha ao enviar documento nativo (%v), enviando mensagem de texto com link", err)
+						h.channelService.SendMessageToChannel(c, msgText)
+						return
+					}
+					// Se o documento nativo PDF foi enviado com sucesso, envia também a mensagem com dados e link
+					h.channelService.SendMessageToChannel(c, msgText)
+					return
+				}
+			}
+
+			// Para WhatsApp Oficial, Telegram ou fallback do Evolution:
+			h.channelService.SendMessageToChannel(c, msgText)
+		}(conv, whatsAppText, link, docNum, dueStr)
+	}
+
 	h.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
-		"message": "Boleto enviado no chat com sucesso!",
-		"fileUrl": fileURL,
+		"message": "Boleto enviado no chat e no canal com sucesso!",
+		"fileUrl": pdfLink,
 		"chatMsg": chatMsg,
 	})
 }

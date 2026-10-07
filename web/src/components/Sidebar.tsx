@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Conversation, ConversationStatus } from '../types/chat';
 import type { UserRole, AuthUser } from '../types/crm';
-import { Search, Clock, CheckCircle2, MessageSquare, AlertCircle, RotateCcw } from 'lucide-react';
+import { Search, Clock, CheckCircle2, MessageSquare, AlertCircle, RotateCcw, Send, Smartphone, Globe, Radio, UserPlus, Star } from 'lucide-react';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -13,6 +13,7 @@ interface SidebarProps {
   onSearchChange: (val: string) => void;
   isConnected: boolean;
   onResetAll?: () => void;
+  onOpenNewChat?: () => void;
   userRole?: UserRole;
   currentUser?: AuthUser | null;
 }
@@ -27,15 +28,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSearchChange,
   isConnected,
   onResetAll,
+  onOpenNewChat,
   userRole,
   currentUser,
 }) => {
   const waitingCount = conversations.filter(c => c.status === 'waiting').length;
   const activeCount = conversations.filter(c => c.status === 'active').length;
-  const closedCount = conversations.filter(c => c.status === 'closed').length;
+  const closedCount = conversations.filter(c => c.status === 'closed' || c.status === 'waiting_rating').length;
 
   const filtered = conversations.filter(c => {
-    const matchesTab = c.status === activeTab;
+    const matchesTab = activeTab === 'closed'
+      ? (c.status === 'closed' || c.status === 'waiting_rating')
+      : c.status === activeTab;
     const term = searchTerm.toLowerCase();
     const matchesSearch = c.clientName.toLowerCase().includes(term) ||
       (c.contactName && c.contactName.toLowerCase().includes(term)) ||
@@ -61,6 +65,48 @@ export const Sidebar: React.FC<SidebarProps> = ({
     .slice(0, 2)
     .map(p => p[0].toUpperCase())
     .join('') || 'AT';
+
+  const renderChannelBadge = (channel?: string) => {
+    switch (channel) {
+      case 'telegram':
+        return (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[10px] font-semibold" title="Canal: Telegram Bot">
+            <Send className="w-2.5 h-2.5" />
+            <span>Telegram</span>
+          </span>
+        );
+      case 'whatsapp_evolution':
+        return (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-semibold" title="Canal: WhatsApp (Evolution)">
+            <MessageSquare className="w-2.5 h-2.5" />
+            <span>WhatsApp</span>
+          </span>
+        );
+      case 'whatsapp_official':
+        return (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-100 text-green-900 text-[10px] font-semibold" title="Canal: WhatsApp Oficial Meta">
+            <Radio className="w-2.5 h-2.5" />
+            <span>WA Oficial</span>
+          </span>
+        );
+      case 'mobile':
+        return (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-semibold" title="Canal: App Mobile SOL">
+            <Smartphone className="w-2.5 h-2.5" />
+            <span>App SOL</span>
+          </span>
+        );
+      case 'web':
+        return (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-semibold" title="Canal: Web Widget">
+            <Globe className="w-2.5 h-2.5" />
+            <span>Web</span>
+          </span>
+        );
+      default:
+        return null;
+    }
+  };
 
   return (
     <aside className="w-80 h-full bg-white border-r border-slate-200 flex flex-col shrink-0 select-none">
@@ -99,7 +145,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Search Input */}
-      <div className="p-3 border-b border-slate-100">
+      <div className="p-3 border-b border-slate-100 space-y-2">
         <div className="relative">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
@@ -110,6 +156,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="w-full pl-9 pr-3 py-1.5 bg-slate-100/70 border border-transparent focus:border-blue-400 focus:bg-white rounded-lg text-sm text-slate-800 placeholder-slate-400 focus:outline-none transition-all"
           />
         </div>
+
+        {onOpenNewChat && (
+          <button
+            onClick={onOpenNewChat}
+            className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 shadow-sm shadow-blue-500/20 transition-all cursor-pointer"
+          >
+            <UserPlus className="w-3.5 h-3.5" />
+            <span>+ Iniciar Atendimento Avulso</span>
+          </button>
+        )}
       </div>
 
       {/* Tabs */}
@@ -198,9 +254,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 )}
 
                 <div className="flex items-center justify-between text-xs">
-                  <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 font-medium text-[11px]">
-                    {conv.department || 'Geral'}
-                  </span>
+                  <div className="flex items-center gap-1.5 overflow-hidden">
+                    <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 font-medium text-[11px] truncate">
+                      {conv.department || 'Geral'}
+                    </span>
+                    {renderChannelBadge(conv.channel)}
+                  </div>
 
                   {conv.status === 'waiting' && (
                     <span className="flex items-center gap-1 text-amber-600 font-medium text-[11px]">
@@ -214,8 +273,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       {conv.operator ? conv.operator.name : 'Ativo'}
                     </span>
                   )}
+                  {conv.status === 'waiting_rating' && (
+                    <span className="flex items-center gap-1 text-amber-700 font-semibold text-[10px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200" title="Atendimento encerrado, aguardando nota de 1 a 5 do cliente no WhatsApp">
+                      <Star className="w-3 h-3 text-amber-500 fill-amber-400" />
+                      Aguardando Nota
+                    </span>
+                  )}
                   {conv.status === 'closed' && (
-                    <span className="text-slate-400 text-[11px]">Finalizado</span>
+                    <span className="text-slate-500 text-[11px] flex items-center gap-1">
+                      {conv.rating ? (
+                        <span className="text-amber-600 font-bold flex items-center gap-0.5 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                          <Star className="w-2.5 h-2.5 text-amber-500 fill-amber-400" />
+                          {conv.rating}★
+                        </span>
+                      ) : (
+                        'Finalizado'
+                      )}
+                    </span>
                   )}
                 </div>
               </div>

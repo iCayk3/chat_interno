@@ -1,6 +1,6 @@
 export type SenderType = 'client' | 'operator' | 'system';
 export type MessageStatus = 'pending' | 'sent' | 'delivered' | 'read';
-export type ConversationStatus = 'waiting' | 'active' | 'closed';
+export type ConversationStatus = 'waiting' | 'active' | 'closed' | 'waiting_rating';
 
 export interface Message {
   id: string;
@@ -30,6 +30,11 @@ export interface Conversation {
   cto?: string;
   status: ConversationStatus;
   operator?: OperatorInfo;
+  channel?: 'mobile' | 'web' | 'telegram' | 'whatsapp_official' | 'whatsapp_evolution';
+  channelId?: string;
+  channelMeta?: Record<string, any>;
+  rating?: number;
+  closedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -55,3 +60,28 @@ export interface WSAction {
   type: string;
   payload?: any;
 }
+
+export interface WhatsAppTemplate {
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  bodyText: string;
+  paramLabels: string[];
+}
+
+export interface StartOutboundChatPayload {
+  channel: 'whatsapp_evolution' | 'whatsapp_official' | 'telegram' | 'mobile';
+  channelId: string;
+  clientName: string;
+  contactName?: string;
+  cpfCnpj?: string;
+  department?: string;
+  operatorId: string;
+  operatorName: string;
+  initialMessage?: string;
+  templateName?: string;
+  templateLanguage?: string;
+  templateParams?: string[];
+}
+

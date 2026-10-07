@@ -1,4 +1,4 @@
-import type { Conversation, Message, CustomerEnrichment } from '../types/chat';
+import type { Conversation, Message, CustomerEnrichment, WhatsAppTemplate, StartOutboundChatPayload } from '../types/chat';
 import type {
   AuthUser,
   LoginResponse,
@@ -15,6 +15,16 @@ import type {
   NetworkPon,
   NetworkCto,
   CreateCtosBatchRequest,
+  ConversationItem,
+  SearchConversationsParams,
+  SearchConversationsResponse,
+  ConversationFullResponse,
+  ReportSummaryResponse,
+  ChannelsConfig,
+  TelegramConfig,
+  WhatsAppOfficialConfig,
+  WhatsAppEvolutionConfig,
+  EvolutionInstance,
 } from '../types/crm';
 
 function getAuthHeaders(): HeadersInit {
@@ -51,7 +61,14 @@ export const api = {
     const res = await fetch('/api/auth/me', {
       headers: getAuthHeaders(),
     });
-    if (!res.ok) throw new Error('Sessão expirada ou não autorizada');
+    if (!res.ok) {
+      if (res.status === 401) {
+        this.clearSession();
+        window.dispatchEvent(new CustomEvent('auth:expired'));
+      }
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Sessão expirada ou não autorizada');
+    }
     return res.json();
   },
 
@@ -59,7 +76,15 @@ export const api = {
     const res = await fetch('/api/auth/users', {
       headers: getAuthHeaders(),
     });
-    if (!res.ok) throw new Error('Falha ao listar usuários');
+    if (!res.ok) {
+      if (res.status === 401) {
+        this.clearSession();
+        window.dispatchEvent(new CustomEvent('auth:expired'));
+        throw new Error('Sessão expirada. Por favor, faça login novamente.');
+      }
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Falha ao listar usuários');
+    }
     return res.json();
   },
 
@@ -76,9 +101,16 @@ export const api = {
       headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Falha ao cadastrar usuário');
-    return data;
+    if (!res.ok) {
+      if (res.status === 401) {
+        this.clearSession();
+        window.dispatchEvent(new CustomEvent('auth:expired'));
+        throw new Error('Sessão expirada. Por favor, faça login novamente.');
+      }
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Falha ao cadastrar usuário');
+    }
+    return res.json();
   },
 
   async updateUser(id: string, payload: {
@@ -94,9 +126,16 @@ export const api = {
       headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Falha ao atualizar usuário');
-    return data;
+    if (!res.ok) {
+      if (res.status === 401) {
+        this.clearSession();
+        window.dispatchEvent(new CustomEvent('auth:expired'));
+        throw new Error('Sessão expirada. Por favor, faça login novamente.');
+      }
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Falha ao atualizar usuário');
+    }
+    return res.json();
   },
 
   async updateProfile(name: string, phone: string, department: string): Promise<AuthUser> {
@@ -105,7 +144,15 @@ export const api = {
       headers: getAuthHeaders(),
       body: JSON.stringify({ name, phone, department }),
     });
-    if (!res.ok) throw new Error('Falha ao atualizar dados de perfil');
+    if (!res.ok) {
+      if (res.status === 401) {
+        this.clearSession();
+        window.dispatchEvent(new CustomEvent('auth:expired'));
+        throw new Error('Sessão expirada. Por favor, faça login novamente.');
+      }
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Falha ao atualizar dados de perfil');
+    }
     const updated = await res.json();
     const token = this.getToken();
     if (token) {
@@ -120,9 +167,16 @@ export const api = {
       headers: getAuthHeaders(),
       body: JSON.stringify({ oldPassword, newPassword }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Falha ao alterar senha');
-    return data;
+    if (!res.ok) {
+      if (res.status === 401) {
+        this.clearSession();
+        window.dispatchEvent(new CustomEvent('auth:expired'));
+        throw new Error('Sessão expirada. Por favor, faça login novamente.');
+      }
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Falha ao alterar senha');
+    }
+    return res.json();
   },
 
   getToken(): string | null {
@@ -140,6 +194,11 @@ export const api = {
   },
 
   getStoredUser(): AuthUser | null {
+    const token = localStorage.getItem('sol_crm_auth_token');
+    if (!token) {
+      localStorage.removeItem('sol_crm_user');
+      return null;
+    }
     const raw = localStorage.getItem('sol_crm_user');
     if (!raw) return null;
     try {
@@ -598,6 +657,266 @@ export const api = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Falha ao salvar associação da rede ao cliente');
+    }
+    return res.json();
+  },
+
+  // --- Consulta e Auditoria Geral de Atendimentos ---
+  async searchConversations(params: SearchConversationsParams = {}): Promise<SearchConversationsResponse> {
+    const query = new URLSearchParams();
+    if (params.operatorId) query.set('operatorId', params.operatorId);
+    if (params.department) query.set('department', params.department);
+    if (params.rbxGroup) query.set('rbxGroup', params.rbxGroup);
+    if (params.status) query.set('status', params.status);
+    if (params.search) query.set('search', params.search);
+    if (params.startDate) query.set('startDate', params.startDate);
+    if (params.endDate) query.set('endDate', params.endDate);
+    if (params.rating) query.set('rating', String(params.rating));
+    if (params.limit) query.set('limit', String(params.limit));
+    if (params.offset) query.set('offset', String(params.offset));
+
+    const res = await fetch(`/api/conversations/search?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao buscar atendimentos');
+    }
+    return res.json();
+  },
+
+  async getConversationFull(id: string): Promise<ConversationFullResponse> {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/full`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao carregar detalhes do atendimento');
+    }
+    return res.json();
+  },
+
+  async rateConversation(id: string, rating: number, comment: string = ''): Promise<{ success: boolean; conversation: ConversationItem }> {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/rate`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ rating, comment }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao registrar avaliação');
+    }
+    return res.json();
+  },
+
+  // --- Relatórios e Métricas Gerenciais (TMA, TME, Satisfação, Volumetria) ---
+  async getReportSummary(params: {
+    period?: string;
+    department?: string;
+    operatorId?: string;
+    startDate?: string;
+    endDate?: string;
+  } = {}): Promise<ReportSummaryResponse> {
+    const query = new URLSearchParams();
+    if (params.period) query.set('period', params.period);
+    if (params.department) query.set('department', params.department);
+    if (params.operatorId) query.set('operatorId', params.operatorId);
+    if (params.startDate) query.set('startDate', params.startDate);
+    if (params.endDate) query.set('endDate', params.endDate);
+
+    const res = await fetch(`/api/reports/summary?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao carregar relatório');
+    }
+    return res.json();
+  },
+
+  // --- Canais Omnichannel (Telegram, WhatsApp Oficial, WhatsApp Evolution) ---
+  async getChannelsConfig(): Promise<ChannelsConfig> {
+    const res = await fetch('/api/channels/config', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao buscar configurações dos canais');
+    }
+    return res.json();
+  },
+
+  async saveTelegramConfig(config: Partial<TelegramConfig>): Promise<{ success: boolean; config: TelegramConfig }> {
+    const res = await fetch('/api/channels/telegram', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar configuração do Telegram');
+    }
+    return res.json();
+  },
+
+  async testTelegram(): Promise<{ success: boolean; botName: string; botUsername: string }> {
+    const res = await fetch('/api/channels/telegram/test', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao testar Bot do Telegram');
+    }
+    return res.json();
+  },
+
+  async setupTelegramWebhook(webhookUrl: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch('/api/channels/telegram/webhook', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ webhookUrl }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao registrar webhook do Telegram');
+    }
+    return res.json();
+  },
+
+  async saveWhatsAppOfficialConfig(config: Partial<WhatsAppOfficialConfig>): Promise<{ success: boolean; config: WhatsAppOfficialConfig }> {
+    const res = await fetch('/api/channels/whatsapp-official', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar configuração do WhatsApp Oficial');
+    }
+    return res.json();
+  },
+
+  async testWhatsAppOfficial(): Promise<{ success: boolean; displayPhoneNumber: string }> {
+    const res = await fetch('/api/channels/whatsapp-official/test', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao testar credenciais do WhatsApp Oficial');
+    }
+    return res.json();
+  },
+
+  async saveEvolutionConfig(config: Partial<WhatsAppEvolutionConfig>): Promise<{ success: boolean; config: WhatsAppEvolutionConfig }> {
+    const res = await fetch('/api/channels/evolution', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar configuração do Evolution');
+    }
+    return res.json();
+  },
+
+  async fetchEvolutionInstances(): Promise<EvolutionInstance[]> {
+    const res = await fetch('/api/channels/evolution/instances', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao listar instâncias do Evolution API');
+    }
+    return res.json();
+  },
+
+  async createEvolutionInstance(instanceName: string): Promise<{ success: boolean; instance: any }> {
+    const res = await fetch('/api/channels/evolution/instance', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ instanceName }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao criar instância no Evolution API');
+    }
+    return res.json();
+  },
+
+  async getEvolutionQRCode(instanceName?: string): Promise<{ pairingCode?: string; code?: string; base64?: string; count?: number }> {
+    const query = instanceName ? `?instance=${encodeURIComponent(instanceName)}` : '';
+    const res = await fetch(`/api/channels/evolution/qrcode${query}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao gerar QR Code do Evolution');
+    }
+    return res.json();
+  },
+
+  async setupEvolutionWebhook(webhookUrl?: string, instanceName?: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch('/api/channels/evolution/webhook', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ webhookUrl, instanceName }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao configurar Webhook no Evolution');
+    }
+    return res.json();
+  },
+
+  async logoutEvolutionInstance(instanceName: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`/api/channels/evolution/instance/${encodeURIComponent(instanceName)}/logout`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao desconectar instância no Evolution');
+    }
+    return res.json();
+  },
+
+  async deleteEvolutionInstance(instanceName: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`/api/channels/evolution/instance/${encodeURIComponent(instanceName)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao excluir instância no Evolution');
+    }
+    return res.json();
+  },
+
+  // Templates aprovados para início de atendimento no WhatsApp Oficial (Meta)
+  async getWhatsAppOfficialTemplates(): Promise<WhatsAppTemplate[]> {
+    const res = await fetch('/api/channels/whatsapp-official/templates', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao listar templates do WhatsApp Oficial');
+    }
+    return res.json();
+  },
+
+  // Iniciar atendimento avulso (outbound) em qualquer canal
+  async startOutboundConversation(payload: StartOutboundChatPayload): Promise<{ conversation: Conversation; message: Message }> {
+    const res = await fetch('/api/conversations/outbound', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao iniciar atendimento avulso');
     }
     return res.json();
   },

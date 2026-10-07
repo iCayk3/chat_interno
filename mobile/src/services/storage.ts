@@ -3,6 +3,8 @@ import { Platform } from 'react-native';
 import { ClientProfile, ConversationSession, Message } from '../types/chat';
 import { getApiHttpBaseUrl } from './chatSocket';
 
+import { notificationService } from './notificationService';
+
 const CLIENT_KEY = '@chat_client_profile';
 const SESSION_KEY = '@chat_current_session';
 const DEVICE_ID_KEY = '@sol_device_id';
@@ -30,6 +32,7 @@ export const storage = {
       const deviceId = await this.getDeviceId();
       const cleanCpf = cpfCnpj.replace(/\D/g, '');
       const baseUrl = getApiHttpBaseUrl();
+      const pushToken = await notificationService.getPushToken();
 
       await fetch(`${baseUrl}/api/devices/register`, {
         method: 'POST',
@@ -39,10 +42,11 @@ export const storage = {
           cpfCnpj: cleanCpf,
           clientName: clientName.trim(),
           platform: Platform.OS,
+          pushToken: pushToken || '',
           appVersion: '1.0.0',
         }),
       });
-      console.log('[DEVICE] Aparelho registrado no backend:', deviceId, 'CPF:', cleanCpf);
+      console.log('[DEVICE] Aparelho registrado no backend:', deviceId, 'CPF:', cleanCpf, 'PushToken:', pushToken ? 'SIM' : 'NÃO');
     } catch (e) {
       console.warn('[DEVICE] Falha ao registrar aparelho:', e);
     }

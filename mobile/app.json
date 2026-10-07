@@ -6,11 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#2563EB"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.solprovedor.central",
@@ -33,14 +28,18 @@
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "INTERNET"
+        "INTERNET",
+        "VIBRATE",
+        "POST_NOTIFICATIONS"
       ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-sharing"
+      "expo-sharing",
+      "expo-notifications",
+      "expo-font"
     ]
   }
 }

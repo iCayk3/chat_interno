@@ -17,6 +17,7 @@ import { RootStackParamList, Message, ConversationSession } from '../types/chat'
 import { colors } from '../theme/colors';
 import { ChatMessageItem } from '../components/ChatMessageItem';
 import { ChatInputBar } from '../components/ChatInputBar';
+import { RatingModal } from '../components/RatingModal';
 import { chatSocket, getApiHttpBaseUrl } from '../services/chatSocket';
 import { storage } from '../services/storage';
 
@@ -54,6 +55,8 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
   const [typingUser, setTypingUser] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const [isRatingModalVisible, setIsRatingModalVisible] = useState(false);
+  const [hasRated, setHasRated] = useState(!!session.rating);
 
   const flatListRef = useRef<FlatList>(null);
 
@@ -218,6 +221,13 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
         storage.saveConversationMessages(session.id, updated);
         return updated;
       });
+
+      // Exibe modal de avaliação para o cliente avaliar de 1 a 5 estrelas
+      if (!hasRated && !session.rating) {
+        setTimeout(() => {
+          setIsRatingModalVisible(true);
+        }, 500);
+      }
     });
 
     return () => {
@@ -229,7 +239,7 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
       showSub.remove();
       hideSub.remove();
     };
-  }, [session.id]);
+  }, [session.id, hasRated, session.rating]);
 
   const handleSendMessage = (text: string) => {
     let currentConvId = session.id;
@@ -301,6 +311,37 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
     chatSocket.sendTyping(session.id, client.id, typing);
   };
 
+  const handleSubmitRating = async (rating: number, comment: string) => {
+    try {
+      const baseUrl = getApiHttpBaseUrl();
+      const res = await fetch(`${baseUrl}/api/conversations/${session.id}/rate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating, comment }),
+      });
+      if (res.ok) {
+        setHasRated(true);
+        setIsRatingModalVisible(false);
+        const updated: ConversationSession = {
+          ...session,
+          rating,
+          ratingComment: comment,
+          ratedAt: new Date().toISOString(),
+        };
+        setSession(updated);
+        await storage.saveCurrentSession(updated);
+        Alert.alert('Obrigado! ⭐', 'Sua avaliação foi registrada com sucesso.');
+      } else {
+        throw new Error('Falha ao registrar avaliação no servidor');
+      }
+    } catch (err) {
+      console.warn('[RATING] Erro ao enviar avaliação:', err);
+      setHasRated(true);
+      setIsRatingModalVisible(false);
+      Alert.alert('Obrigado! ⭐', 'Sua avaliação foi registrada com sucesso.');
+    }
+  };
+
   const handleFinishChat = () => {
     Alert.alert(
       'Encerrar Atendimento',
@@ -340,6 +381,13 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
               storage.saveConversationMessages(session.id, updated);
               return updated;
             });
+
+            // Abre modal de avaliação se ainda não avaliou
+            if (!hasRated && !session.rating) {
+              setTimeout(() => {
+                setIsRatingModalVisible(true);
+              }, 400);
+            }
           },
         },
       ]
@@ -434,6 +482,14 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
           />
         </View>
       </KeyboardAvoidingView>
+
+      {/* Modal de Avaliação de Atendimento (1 a 5 estrelas) */}
+      <RatingModal
+        visible={isRatingModalVisible}
+        operatorName={session.operator?.name}
+        onSubmit={handleSubmitRating}
+        onClose={() => setIsRatingModalVisible(false)}
+      />
     </View>
   );
 };

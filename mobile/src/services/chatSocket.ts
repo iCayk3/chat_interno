@@ -1,5 +1,7 @@
 import Constants from 'expo-constants';
+import { AppState } from 'react-native';
 import { Message } from '../types/chat';
+import { notificationService } from './notificationService';
 
 type MessageHandler = (message: Message) => void;
 type StatusHandler = (connected: boolean) => void;
@@ -119,6 +121,19 @@ class ChatSocketService {
             const data = JSON.parse(line);
             if (data.type === 'message' && data.payload) {
               this.notifyMessage(data.payload);
+              // Notifica nativamente com som e banner caso o operador responda com o app minimizado
+              if (data.payload.senderType === 'operator' && AppState.currentState !== 'active') {
+                notificationService.showNativeNotification(
+                  `Atendente: ${data.payload.senderName || 'Suporte SOL'}`,
+                  data.payload.content || 'Nova mensagem no atendimento',
+                  {
+                    type: 'chat_message',
+                    conversationId: data.payload.conversationId,
+                    senderName: data.payload.senderName,
+                  },
+                  'sol-chat'
+                ).catch(() => {});
+              }
             } else if (data.type === 'typing' && data.payload) {
               this.notifyTyping(data.payload.isTyping, data.payload.senderName || 'Operador');
             } else if (data.type === 'operator_assigned' && data.payload) {
@@ -128,6 +143,12 @@ class ChatSocketService {
               this.notifyChatClosed(reason);
             } else if (data.type === 'campaign_notification' && data.payload) {
               this.notifyNotification(data.payload);
+              notificationService.showNativeNotification(
+                data.payload.title || 'Comunicado Importante',
+                data.payload.message || 'Você recebeu um novo comunicado.',
+                data.payload,
+                'sol-campaigns'
+              ).catch(() => {});
             }
           }
         } catch (e) {

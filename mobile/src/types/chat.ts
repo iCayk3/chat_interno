@@ -36,6 +36,9 @@ export interface ConversationSession {
     avatarUrl?: string;
   };
   createdAt: string;
+  rating?: number;
+  ratingComment?: string;
+  ratedAt?: string;
 }
 
 export type RootStackParamList = {

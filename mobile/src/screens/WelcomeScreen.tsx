@@ -13,6 +13,7 @@ import {
   Linking,
   Modal,
   Image,
+  AppState,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -25,6 +26,7 @@ import { colors } from '../theme/colors';
 import { storage } from '../services/storage';
 import { downloadAndSavePdf } from '../services/fileDownload';
 import { chatSocket } from '../services/chatSocket';
+import { notificationService, NotificationPayload } from '../services/notificationService';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Welcome'>;
 
@@ -39,6 +41,7 @@ interface ClientNotification {
   actionType: 'chat_and_view' | 'view_only';
   chatInitialMsg?: string;
   cpfCnpj?: string;
+  deviceId?: string;
   read: boolean;
   createdAt: string;
 }
@@ -161,17 +164,73 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
     }
   };
 
-  // Escuta notificações em tempo real e registra o aparelho no backend
+  // Escuta notificações em tempo real, registra o aparelho no backend e trata pushs nativos
   useEffect(() => {
     let isMounted = true;
 
+    // Função de abertura/contexto quando o cliente toca na notificação nativa (fora do app ou barra de status)
+    const handlePushResponse = (data: NotificationPayload) => {
+      console.log('[PUSH TAP] Notificação tocada pelo cliente:', data);
+      if (!data) return;
+
+      // Se o push for de resposta de chat do operador, navega diretamente para a conversa
+      if (data.type === 'chat_message' && data.conversationId) {
+        storage.getClientProfile().then((profile) => {
+          if (profile) {
+            storage.getCurrentSession().then((session) => {
+              if (session && session.id === data.conversationId) {
+                navigation.navigate('Chat', { client: profile, session });
+              }
+            });
+          }
+        });
+        return;
+      }
+
+      const parsed: ClientNotification = {
+        id: data.notificationId || data.id || `notif-${Date.now()}`,
+        campaignId: data.campaignId || '',
+        title: data.title || 'Comunicado Importante',
+        message: data.message || '',
+        department: data.department || '',
+        actionType: (data.actionType as any) || 'chat_and_view',
+        chatInitialMsg: data.chatInitialMsg || '',
+        cpfCnpj: data.cpfCnpj || '',
+        deviceId: data.deviceId || '',
+        read: false,
+        createdAt: new Date().toISOString(),
+      };
+
+      setUnreadNotifications((prev) => {
+        const exists = prev.some((n) => n.id === parsed.id);
+        if (exists) return prev;
+        return [parsed, ...prev];
+      });
+      setActiveNotification(parsed);
+    };
+
+    const pushSub = notificationService.addNotificationResponseListener(handlePushResponse);
+    notificationService.checkInitialNotification(handlePushResponse);
+
+    // Escuta retorno do app do plano de fundo para primeiro plano
+    const appStateSub = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'active') {
+        storage.getClientProfile().then((profile) => {
+          fetchClientNotifications(profile?.cpfCnpj || '');
+        });
+      }
+    });
+
     (async () => {
       try {
+        // Inicializa canais nativos do Android (som, vibração e alta prioridade) e pede permissões
+        await notificationService.initNotifications();
+
         const deviceId = await storage.getDeviceId();
         const profile = await storage.getClientProfile();
         const cleanCpf = profile?.cpfCnpj || '';
 
-        // Garante registro inicial do aparelho no backend
+        // Garante registro inicial do aparelho e token de push no backend
         await storage.registerDevice(cleanCpf, profile?.name || '');
 
         // Conecta ao WS para receber broadcasts e notificações em tempo real
@@ -207,6 +266,8 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
 
     return () => {
       isMounted = false;
+      pushSub.remove();
+      appStateSub.remove();
       unsubscribeNotif();
     };
   }, []);

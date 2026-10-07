@@ -99,6 +99,25 @@ func (h *Handler) HandleDispatchCampaign(w http.ResponseWriter, r *http.Request)
 		})
 	}
 
+	// Dispara PUSH NOTIFICATIONS nativas no celular do cliente (estilo WhatsApp)
+	// Funciona com app minimizado, tela desligada ou aplicativo completamente fechado!
+	if h.pushService != nil && len(notifs) > 0 {
+		tokens := h.campaignService.GetPushTokensForNotifications(notifs)
+		if len(tokens) > 0 {
+			pushData := map[string]interface{}{
+				"type":           "campaign_notification",
+				"campaignId":     id,
+				"notificationId": notifs[0].ID,
+				"actionType":     notifs[0].ActionType,
+				"title":          notifs[0].Title,
+				"message":        notifs[0].Message,
+				"department":     notifs[0].Department,
+				"chatInitialMsg": notifs[0].ChatInitialMsg,
+			}
+			h.pushService.SendCampaignPush(tokens, notifs[0].Title, notifs[0].Message, pushData)
+		}
+	}
+
 	h.respondJSON(w, http.StatusOK, res)
 }
 

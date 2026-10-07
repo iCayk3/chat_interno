@@ -44,13 +44,17 @@ func main() {
 	fileService := services.NewFileService("storage/temp_boletos")
 	campaignService := services.NewCampaignService(db, rbxService)
 	networkService := services.NewNetworkService(db)
+	pushService := services.NewPushService()
+	channelService := services.NewChannelService(db, chatService)
 
 	// 3. Inicializa e roda o Hub WebSocket
 	hub := websocket.NewHub(chatService)
 	go hub.Run()
 
+	channelService.SetHub(hub)
+
 	// 4. Inicializa handlers e limitadores
-	h := handlers.NewHandler(chatService, extService, authService, rbxService, fileService, campaignService, networkService, db, hub, cfg.AllowedOrigins)
+	h := handlers.NewHandler(chatService, extService, authService, rbxService, fileService, campaignService, networkService, pushService, channelService, db, hub, cfg.AllowedOrigins)
 	rateLimiter := middleware.NewIPRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst)
 
 	// 5. Configura roteador Chi com middlewares de segurança
@@ -84,13 +88,22 @@ func main() {
 
 	r.Route("/api/conversations", func(r chi.Router) {
 		r.Post("/", h.HandleCreateConversation)                // Iniciar novo atendimento
+		r.Post("/outbound", h.HandleStartOutboundConversation) // Iniciar atendimento avulso (outbound)
 		r.Get("/", h.HandleListConversations)                  // Listar atendimentos (para painel operador)
+		r.Get("/search", h.HandleSearchConversations)          // Busca avançada / Consulta de atendimentos
 		r.Post("/reset", h.HandleResetAll)                     // Encerra e limpa todo o histórico para testes do zero
 		r.Get("/{id}", h.HandleGetConversation)                // Detalhes do atendimento
+		r.Get("/{id}/full", h.HandleGetConversationFull)       // Detalhes completos + histórico de mensagens
 		r.Get("/{id}/messages", h.HandleGetMessages)           // Histórico de mensagens
 		r.Put("/{id}/network", h.HandleUpdateConversationNetwork) // Atualiza OLT, PON e CTO
 		r.Post("/{id}/assign", h.HandleAssignOperator)         // Operador assume atendimento
 		r.Post("/{id}/close", h.HandleCloseConversation)       // Encerramento do atendimento
+		r.Post("/{id}/rate", h.HandleRateConversation)         // Avaliação do cliente (1 a 5 estrelas)
+	})
+
+	// Relatórios e Métricas de Atendimento (TMA, TME, Satisfação, Volumetria)
+	r.Route("/api/reports", func(r chi.Router) {
+		r.Get("/summary", h.HandleGetReportSummary)
 	})
 
 	// Configurações do Chat, Mensagens de Encerramento e Fluxo Visual do Bot
@@ -162,6 +175,43 @@ func main() {
 
 	// Download de arquivos temporários (boletos auto-excluídos após 1h)
 	r.Get("/api/files/boletos/{filename}", h.HandleServeBoletoFile)
+
+	// Gestão de Canais Omnichannel (Telegram, WhatsApp Oficial Meta, WhatsApp Evolution API)
+	r.Route("/api/channels", func(r chi.Router) {
+		r.Get("/config", h.HandleGetChannelsConfig)
+		r.Put("/telegram", h.HandleSaveTelegramConfig)
+		r.Post("/telegram/test", h.HandleTestTelegram)
+		r.Post("/telegram/webhook/setup", h.HandleSetupTelegramWebhook)
+		r.Post("/telegram/webhook", h.HandleTelegramWebhook)
+
+		r.Post("/whatsapp-official", h.HandleSaveWhatsAppOfficialConfig)
+		r.Put("/whatsapp-official", h.HandleSaveWhatsAppOfficialConfig)
+		r.Get("/whatsapp-official/templates", h.HandleGetWhatsAppTemplates)
+		r.Post("/whatsapp-official/test", h.HandleTestWhatsAppOfficial)
+		r.Get("/whatsapp-official/webhook", h.HandleWhatsAppOfficialWebhookVerify)
+		r.Post("/whatsapp-official/webhook", h.HandleWhatsAppOfficialWebhook)
+
+		r.Post("/evolution", h.HandleSaveEvolutionConfig)
+		r.Put("/evolution", h.HandleSaveEvolutionConfig)
+		r.Get("/evolution/instances", h.HandleFetchEvolutionInstances)
+		r.Post("/evolution/instance", h.HandleCreateEvolutionInstance)
+		r.Post("/evolution/instance/create", h.HandleCreateEvolutionInstance)
+		r.Get("/evolution/qrcode", h.HandleGetEvolutionQRCode)
+		r.Get("/evolution/instance/{name}/qrcode", h.HandleGetEvolutionQRCode)
+		r.Post("/evolution/instance/{name}/logout", h.HandleLogoutEvolutionInstance)
+		r.Post("/evolution/logout", h.HandleLogoutEvolutionInstance)
+		r.Delete("/evolution/instance/{name}", h.HandleDeleteEvolutionInstance)
+		r.Delete("/evolution/instance", h.HandleDeleteEvolutionInstance)
+		r.Post("/evolution/webhook", h.HandleSetupEvolutionWebhook)
+		r.Post("/evolution/webhook/setup", h.HandleSetupEvolutionWebhook)
+	})
+
+	// Webhooks públicos dedicados
+	r.Post("/api/webhooks/telegram", h.HandleTelegramWebhook)
+	r.Get("/api/webhooks/whatsapp-official", h.HandleWhatsAppOfficialWebhookVerify)
+	r.Post("/api/webhooks/whatsapp-official", h.HandleWhatsAppOfficialWebhook)
+	r.Post("/api/webhooks/evolution", h.HandleEvolutionWebhook)
+	r.Post("/api/webhooks/evolution/*", h.HandleEvolutionWebhook)
 
 	// Consultas a APIs externas
 	r.Get("/api/customers/lookup", h.HandleCustomerLookup)

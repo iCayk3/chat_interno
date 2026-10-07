@@ -252,9 +252,17 @@ export const AtendentesView: React.FC<AtendentesViewProps> = ({
             <AlertCircle className="w-4 h-4 text-rose-500 shrink-0" />
             <span>{errorMessage}</span>
           </div>
-          <button onClick={() => setErrorMessage(null)} className="text-rose-400 hover:text-rose-600">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadAttendants}
+              className="px-2.5 py-1 bg-rose-100 hover:bg-rose-200 text-rose-800 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+            >
+              Tentar novamente
+            </button>
+            <button onClick={() => setErrorMessage(null)} className="text-rose-400 hover:text-rose-600 cursor-pointer">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       )}
 

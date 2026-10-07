@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	"chat-interno-server/internal/models"
 )
@@ -180,6 +181,33 @@ func (db *DB) runMigrations() error {
 
 	CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
 	CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp ASC);
+
+	-- Migrações incrementais seguras para conversations (TMA, TME, Avaliações, Grupos RBX)
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS rbx_group VARCHAR(150) DEFAULT '';
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP WITH TIME ZONE;
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE;
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS closed_by VARCHAR(32) DEFAULT '';
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS close_reason TEXT DEFAULT '';
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS rating INT;
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS rating_comment TEXT DEFAULT '';
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS rated_at TIMESTAMP WITH TIME ZONE;
+
+	-- Migrações incrementais para canais Omnichannel (Telegram, WhatsApp Oficial, WhatsApp Evolution)
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel VARCHAR(50) DEFAULT 'mobile';
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_id VARCHAR(100) DEFAULT '';
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_meta TEXT DEFAULT '';
+
+	CREATE INDEX IF NOT EXISTS idx_conversations_operator ON conversations(operator_id);
+	CREATE INDEX IF NOT EXISTS idx_conversations_dept ON conversations(department);
+	CREATE INDEX IF NOT EXISTS idx_conversations_rating ON conversations(rating);
+	CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel, channel_id);
+
+	CREATE TABLE IF NOT EXISTS channel_configs (
+		key VARCHAR(50) PRIMARY KEY,
+		data JSONB NOT NULL,
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
 	`
 
 	if _, err := db.Exec(query); err != nil {
@@ -253,7 +281,7 @@ func CheckPassword(plain, hashed string) bool {
 func (db *DB) GetUserByEmail(email string) (*models.User, error) {
 	cleanEmail := strings.ToLower(strings.TrimSpace(email))
 	query := `
-	SELECT id, name, email, role, department, password_hash, active, phone, created_at, last_login
+	SELECT id, name, email, role, department, password_hash, active, COALESCE(phone, ''), created_at, COALESCE(last_login, now())
 	FROM users WHERE LOWER(email) = $1
 	`
 	row := db.QueryRow(query, cleanEmail)
@@ -270,7 +298,7 @@ func (db *DB) GetUserByEmail(email string) (*models.User, error) {
 
 func (db *DB) GetUserByID(id string) (*models.User, error) {
 	query := `
-	SELECT id, name, email, role, department, password_hash, active, phone, created_at, last_login
+	SELECT id, name, email, role, department, password_hash, active, COALESCE(phone, ''), created_at, COALESCE(last_login, now())
 	FROM users WHERE id = $1
 	`
 	row := db.QueryRow(query, id)
@@ -287,7 +315,7 @@ func (db *DB) GetUserByID(id string) (*models.User, error) {
 
 func (db *DB) ListUsers() ([]*models.User, error) {
 	query := `
-	SELECT id, name, email, role, department, active, phone, created_at, last_login
+	SELECT id, name, email, role, department, active, COALESCE(phone, ''), created_at, COALESCE(last_login, now())
 	FROM users ORDER BY created_at ASC
 	`
 	rows, err := db.Query(query)
@@ -325,7 +353,7 @@ func (db *DB) UpdateUser(id, name, email, role, department, phone string, active
 	UPDATE users
 	SET name = $2, email = $3, role = $4, department = $5, phone = $6, active = $7
 	WHERE id = $1
-	RETURNING id, name, email, role, department, active, phone, created_at, last_login
+	RETURNING id, name, email, role, department, active, COALESCE(phone, ''), created_at, COALESCE(last_login, now())
 	`
 	var u models.User
 	var roleStr string
@@ -348,7 +376,7 @@ func (db *DB) UpdateUserProfile(id, name, phone, department string) (*models.Use
 	UPDATE users
 	SET name = $2, phone = $3, department = $4
 	WHERE id = $1
-	RETURNING id, name, email, role, department, active, phone, created_at, last_login
+	RETURNING id, name, email, role, department, active, COALESCE(phone, ''), created_at, COALESCE(last_login, now())
 	`
 	var u models.User
 	var roleStr string
@@ -1104,6 +1132,70 @@ func (db *DB) DeleteCto(id string) error {
 // PERSISTÊNCIA DE CONVERSAS E MENSAGENS (CHAT)
 // ==========================================
 
+func scanConversationRow(scanner interface{ Scan(dest ...any) error }) (*models.Conversation, error) {
+	var conv models.Conversation
+	var opID, opName, statusStr string
+	var rbxGroup, closedBy, closeReason, ratingComment, channel, channelID, channelMeta sql.NullString
+	var assignedAt, closedAt, ratedAt sql.NullTime
+	var rating sql.NullInt32
+
+	err := scanner.Scan(
+		&conv.ID, &conv.ClientID, &conv.ClientName, &conv.ContactName, &conv.CpfCnpj,
+		&conv.Department, &rbxGroup, &statusStr, &opID, &opName, &conv.OLT, &conv.PON, &conv.CTO,
+		&conv.CreatedAt, &conv.UpdatedAt,
+		&assignedAt, &closedAt, &closedBy, &closeReason, &rating, &ratingComment, &ratedAt,
+		&channel, &channelID, &channelMeta,
+	)
+	if err != nil {
+		return nil, err
+	}
+	conv.Status = models.ConversationStatus(statusStr)
+	if rbxGroup.Valid {
+		conv.RbxGroup = rbxGroup.String
+	}
+	if opID != "" || opName != "" {
+		conv.Operator = &models.OperatorInfo{
+			ID:   opID,
+			Name: opName,
+		}
+	}
+	if assignedAt.Valid {
+		conv.AssignedAt = &assignedAt.Time
+	}
+	if closedAt.Valid {
+		conv.ClosedAt = &closedAt.Time
+	}
+	if closedBy.Valid {
+		conv.ClosedBy = closedBy.String
+	}
+	if closeReason.Valid {
+		conv.CloseReason = closeReason.String
+	}
+	if rating.Valid {
+		r := int(rating.Int32)
+		conv.Rating = &r
+	}
+	if ratingComment.Valid {
+		conv.RatingComment = ratingComment.String
+	}
+	if ratedAt.Valid {
+		conv.RatedAt = &ratedAt.Time
+	}
+
+	conv.Channel = "mobile"
+	if channel.Valid && channel.String != "" {
+		conv.Channel = channel.String
+	}
+	if channelID.Valid {
+		conv.ChannelID = channelID.String
+	}
+	if channelMeta.Valid {
+		conv.ChannelMeta = channelMeta.String
+	}
+
+	return &conv, nil
+}
+
 // UpsertConversation salva ou atualiza uma conversa no PostgreSQL
 func (db *DB) UpsertConversation(conv *models.Conversation) error {
 	if conv == nil || conv.ID == "" {
@@ -1115,28 +1207,51 @@ func (db *DB) UpsertConversation(conv *models.Conversation) error {
 		opID = conv.Operator.ID
 		opName = conv.Operator.Name
 	}
+	ch := conv.Channel
+	if ch == "" {
+		ch = "mobile"
+	}
 	query := `
 	INSERT INTO conversations (
-		id, client_id, client_name, contact_name, cpf_cnpj, department, status,
-		operator_id, operator_name, olt, pon, cto, created_at, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
+		operator_id, operator_name, olt, pon, cto, created_at, updated_at,
+		assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
+		channel, channel_id, channel_meta
+	) VALUES (
+		$1, $2, $3, $4, $5, $6, $7, $8,
+		$9, $10, $11, $12, $13, $14, $15,
+		$16, $17, $18, $19, $20, $21, $22,
+		$23, $24, $25
+	)
 	ON CONFLICT (id) DO UPDATE SET
 		client_name = EXCLUDED.client_name,
 		contact_name = EXCLUDED.contact_name,
 		cpf_cnpj = CASE WHEN EXCLUDED.cpf_cnpj != '' THEN EXCLUDED.cpf_cnpj ELSE conversations.cpf_cnpj END,
 		department = EXCLUDED.department,
+		rbx_group = CASE WHEN EXCLUDED.rbx_group != '' THEN EXCLUDED.rbx_group ELSE conversations.rbx_group END,
 		status = EXCLUDED.status,
 		operator_id = EXCLUDED.operator_id,
 		operator_name = EXCLUDED.operator_name,
 		olt = CASE WHEN EXCLUDED.olt != '' THEN EXCLUDED.olt ELSE conversations.olt END,
 		pon = CASE WHEN EXCLUDED.pon != '' THEN EXCLUDED.pon ELSE conversations.pon END,
 		cto = CASE WHEN EXCLUDED.cto != '' THEN EXCLUDED.cto ELSE conversations.cto END,
+		assigned_at = COALESCE(EXCLUDED.assigned_at, conversations.assigned_at),
+		closed_at = COALESCE(EXCLUDED.closed_at, conversations.closed_at),
+		closed_by = CASE WHEN EXCLUDED.closed_by != '' THEN EXCLUDED.closed_by ELSE conversations.closed_by END,
+		close_reason = CASE WHEN EXCLUDED.close_reason != '' THEN EXCLUDED.close_reason ELSE conversations.close_reason END,
+		rating = COALESCE(EXCLUDED.rating, conversations.rating),
+		rating_comment = CASE WHEN EXCLUDED.rating_comment != '' THEN EXCLUDED.rating_comment ELSE conversations.rating_comment END,
+		rated_at = COALESCE(EXCLUDED.rated_at, conversations.rated_at),
+		channel = CASE WHEN EXCLUDED.channel != '' AND EXCLUDED.channel != 'mobile' THEN EXCLUDED.channel WHEN conversations.channel != '' THEN conversations.channel ELSE 'mobile' END,
+		channel_id = CASE WHEN EXCLUDED.channel_id != '' THEN EXCLUDED.channel_id ELSE conversations.channel_id END,
+		channel_meta = CASE WHEN EXCLUDED.channel_meta != '' THEN EXCLUDED.channel_meta ELSE conversations.channel_meta END,
 		updated_at = EXCLUDED.updated_at;
 	`
 	_, err := db.Exec(query,
-		conv.ID, conv.ClientID, conv.ClientName, conv.ContactName, conv.CpfCnpj,
-		conv.Department, string(conv.Status), opID, opName,
-		conv.OLT, conv.PON, conv.CTO, conv.CreatedAt, conv.UpdatedAt,
+		conv.ID, conv.ClientID, conv.ClientName, conv.ContactName, conv.CpfCnpj, conv.Department, conv.RbxGroup, string(conv.Status),
+		opID, opName, conv.OLT, conv.PON, conv.CTO, conv.CreatedAt, conv.UpdatedAt,
+		conv.AssignedAt, conv.ClosedAt, conv.ClosedBy, conv.CloseReason, conv.Rating, conv.RatingComment, conv.RatedAt,
+		ch, conv.ChannelID, conv.ChannelMeta,
 	)
 	return err
 }
@@ -1144,37 +1259,25 @@ func (db *DB) UpsertConversation(conv *models.Conversation) error {
 // GetConversationByID busca uma conversa específica no banco
 func (db *DB) GetConversationByID(id string) (*models.Conversation, error) {
 	query := `
-	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, status,
-	       operator_id, operator_name, olt, pon, cto, created_at, updated_at
+	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
+	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
+	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
+	       channel, channel_id, channel_meta
 	FROM conversations WHERE id = $1;
 	`
-	var conv models.Conversation
-	var opID, opName, statusStr string
-	err := db.QueryRow(query, id).Scan(
-		&conv.ID, &conv.ClientID, &conv.ClientName, &conv.ContactName, &conv.CpfCnpj,
-		&conv.Department, &statusStr, &opID, &opName, &conv.OLT, &conv.PON, &conv.CTO,
-		&conv.CreatedAt, &conv.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-	conv.Status = models.ConversationStatus(statusStr)
-	if opID != "" || opName != "" {
-		conv.Operator = &models.OperatorInfo{
-			ID:   opID,
-			Name: opName,
-		}
-	}
-	return &conv, nil
+	row := db.QueryRow(query, id)
+	return scanConversationRow(row)
 }
 
 // ListConversations retorna todas as conversas do banco, com filtros opcionais de status e CPF/CNPJ
 func (db *DB) ListConversations(status models.ConversationStatus, cpfCnpj string) ([]*models.Conversation, error) {
 	query := `
-	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, status,
-	       operator_id, operator_name, olt, pon, cto, created_at, updated_at
+	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
+	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
+	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
+	       channel, channel_id, channel_meta
 	FROM conversations
-	WHERE ($1 = '' OR status = $1)
+	WHERE ($1 = '' OR status = $1 OR ($1 = 'closed' AND status = 'waiting_rating'))
 	  AND ($2 = '' OR cpf_cnpj = $2)
 	ORDER BY updated_at DESC;
 	`
@@ -1186,26 +1289,313 @@ func (db *DB) ListConversations(status models.ConversationStatus, cpfCnpj string
 
 	list := make([]*models.Conversation, 0)
 	for rows.Next() {
-		var conv models.Conversation
-		var opID, opName, statusStr string
-		err := rows.Scan(
-			&conv.ID, &conv.ClientID, &conv.ClientName, &conv.ContactName, &conv.CpfCnpj,
-			&conv.Department, &statusStr, &opID, &opName, &conv.OLT, &conv.PON, &conv.CTO,
-			&conv.CreatedAt, &conv.UpdatedAt,
-		)
+		conv, err := scanConversationRow(rows)
 		if err != nil {
 			continue
 		}
-		conv.Status = models.ConversationStatus(statusStr)
-		if opID != "" || opName != "" {
-			conv.Operator = &models.OperatorInfo{
-				ID:   opID,
-				Name: opName,
-			}
-		}
-		list = append(list, &conv)
+		list = append(list, conv)
 	}
 	return list, nil
+}
+
+// SaveConversationRating grava nota de 1 a 5 estrelas e comentário deixado pelo cliente
+func (db *DB) SaveConversationRating(convID string, rating int, comment string) error {
+	if rating < 1 {
+		rating = 1
+	}
+	if rating > 5 {
+		rating = 5
+	}
+	query := `
+	UPDATE conversations
+	SET rating = $1, rating_comment = $2, rated_at = NOW(), updated_at = NOW()
+	WHERE id = $3;
+	`
+	_, err := db.Exec(query, rating, strings.TrimSpace(comment), convID)
+	return err
+}
+
+// SearchConversations busca qualquer atendimento com filtros combinados (operador, setor, grupo RBX, data, termo)
+func (db *DB) SearchConversations(filter models.SearchConversationsFilter) ([]*models.Conversation, int, error) {
+	whereClauses := []string{"1=1"}
+	args := []interface{}{}
+	argIdx := 1
+
+	if filter.OperatorID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("operator_id = $%d", argIdx))
+		args = append(args, filter.OperatorID)
+		argIdx++
+	}
+	if filter.Department != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("department = $%d", argIdx))
+		args = append(args, filter.Department)
+		argIdx++
+	}
+	if filter.RbxGroup != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("rbx_group = $%d", argIdx))
+		args = append(args, filter.RbxGroup)
+		argIdx++
+	}
+	if filter.Status != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, filter.Status)
+		argIdx++
+	}
+	if filter.Rating != nil && *filter.Rating > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("rating = $%d", argIdx))
+		args = append(args, *filter.Rating)
+		argIdx++
+	}
+	if filter.StartDate != nil {
+		whereClauses = append(whereClauses, fmt.Sprintf("created_at >= $%d", argIdx))
+		args = append(args, *filter.StartDate)
+		argIdx++
+	}
+	if filter.EndDate != nil {
+		whereClauses = append(whereClauses, fmt.Sprintf("created_at <= $%d", argIdx))
+		args = append(args, *filter.EndDate)
+		argIdx++
+	}
+	if filter.SearchTerm != "" {
+		pattern := "%" + strings.ToLower(filter.SearchTerm) + "%"
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(LOWER(client_name) LIKE $%d OR LOWER(contact_name) LIKE $%d OR LOWER(cpf_cnpj) LIKE $%d OR LOWER(id) LIKE $%d OR LOWER(cto) LIKE $%d OR LOWER(olt) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
+		))
+		args = append(args, pattern)
+		argIdx++
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM conversations WHERE %s", whereSQL)
+	var total int
+	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	dataQuery := fmt.Sprintf(`
+	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
+	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
+	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
+	       channel, channel_id, channel_meta
+	FROM conversations
+	WHERE %s
+	ORDER BY created_at DESC
+	LIMIT $%d OFFSET $%d;
+	`, whereSQL, argIdx, argIdx+1)
+
+	args = append(args, limit, offset)
+
+	rows, err := db.Query(dataQuery, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	list := make([]*models.Conversation, 0)
+	for rows.Next() {
+		conv, err := scanConversationRow(rows)
+		if err != nil {
+			continue
+		}
+		list = append(list, conv)
+	}
+
+	return list, total, nil
+}
+
+// GetReportsSummary calcula indicadores consolidados com TMA, TME e satisfação CSAT
+func (db *DB) GetReportsSummary(filter models.ReportMetricsFilter) (*models.ReportSummaryResponse, error) {
+	whereClauses := []string{"1=1"}
+	args := []interface{}{}
+	argIdx := 1
+
+	now := time.Now().UTC()
+	var startDate, endDate time.Time
+
+	switch filter.Period {
+	case "today":
+		startDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		endDate = now
+	case "7days":
+		startDate = now.AddDate(0, 0, -7)
+		endDate = now
+	case "30days":
+		startDate = now.AddDate(0, 0, -30)
+		endDate = now
+	case "month":
+		startDate = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		endDate = now
+	default:
+		if filter.StartDate != nil {
+			startDate = *filter.StartDate
+		}
+		if filter.EndDate != nil {
+			endDate = *filter.EndDate
+		}
+	}
+
+	if !startDate.IsZero() {
+		whereClauses = append(whereClauses, fmt.Sprintf("created_at >= $%d", argIdx))
+		args = append(args, startDate)
+		argIdx++
+	}
+	if !endDate.IsZero() {
+		whereClauses = append(whereClauses, fmt.Sprintf("created_at <= $%d", argIdx))
+		args = append(args, endDate)
+		argIdx++
+	}
+	if filter.Department != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("department = $%d", argIdx))
+		args = append(args, filter.Department)
+		argIdx++
+	}
+	if filter.OperatorID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("operator_id = $%d", argIdx))
+		args = append(args, filter.OperatorID)
+		argIdx++
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	summaryQuery := fmt.Sprintf(`
+	SELECT
+		COUNT(*),
+		COUNT(CASE WHEN status = 'closed' THEN 1 END),
+		COUNT(CASE WHEN status = 'active' THEN 1 END),
+		COUNT(CASE WHEN status = 'waiting' THEN 1 END),
+		COALESCE(AVG(CASE WHEN status = 'closed' AND assigned_at IS NOT NULL AND closed_at IS NOT NULL AND closed_at >= assigned_at THEN EXTRACT(EPOCH FROM (closed_at - assigned_at)) END), 0),
+		COALESCE(AVG(CASE WHEN assigned_at IS NOT NULL AND assigned_at >= created_at THEN EXTRACT(EPOCH FROM (assigned_at - created_at)) END), 0),
+		COALESCE(AVG(rating), 0),
+		COUNT(rating)
+	FROM conversations
+	WHERE %s;
+	`, whereSQL)
+
+	resp := &models.ReportSummaryResponse{
+		RatingDistribution: make(map[string]int),
+		Departments:        make([]models.DepartmentMetric, 0),
+		Operators:          make([]models.OperatorMetric, 0),
+		DailyVolume:        make([]models.DailyVolumeMetric, 0),
+	}
+
+	err := db.QueryRow(summaryQuery, args...).Scan(
+		&resp.TotalTickets,
+		&resp.ClosedTickets,
+		&resp.ActiveTickets,
+		&resp.WaitingTickets,
+		&resp.AvgTMASeconds,
+		&resp.AvgTMESeconds,
+		&resp.AvgRating,
+		&resp.TotalRated,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Distribuição de notas (1 a 5)
+	distQuery := fmt.Sprintf(`
+	SELECT rating, COUNT(*)
+	FROM conversations
+	WHERE %s AND rating IS NOT NULL
+	GROUP BY rating;
+	`, whereSQL)
+
+	if rows, err := db.Query(distQuery, args...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var r, count int
+			if err := rows.Scan(&r, &count); err == nil {
+				resp.RatingDistribution[fmt.Sprintf("%d", r)] = count
+			}
+		}
+	}
+
+	// Métricas por Departamento
+	deptQuery := fmt.Sprintf(`
+	SELECT
+		department,
+		COUNT(*),
+		COALESCE(AVG(CASE WHEN status = 'closed' AND assigned_at IS NOT NULL AND closed_at IS NOT NULL AND closed_at >= assigned_at THEN EXTRACT(EPOCH FROM (closed_at - assigned_at)) END), 0),
+		COALESCE(AVG(CASE WHEN assigned_at IS NOT NULL AND assigned_at >= created_at THEN EXTRACT(EPOCH FROM (assigned_at - created_at)) END), 0),
+		COALESCE(AVG(rating), 0),
+		COUNT(rating)
+	FROM conversations
+	WHERE %s AND department != ''
+	GROUP BY department
+	ORDER BY COUNT(*) DESC;
+	`, whereSQL)
+
+	if rows, err := db.Query(deptQuery, args...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var d models.DepartmentMetric
+			if err := rows.Scan(&d.Department, &d.TotalTickets, &d.AvgTMASeconds, &d.AvgTMESeconds, &d.AvgRating, &d.RatedCount); err == nil {
+				resp.Departments = append(resp.Departments, d)
+			}
+		}
+	}
+
+	// Métricas por Atendente
+	opQuery := fmt.Sprintf(`
+	SELECT
+		operator_id,
+		operator_name,
+		department,
+		COUNT(*),
+		COALESCE(AVG(CASE WHEN status = 'closed' AND assigned_at IS NOT NULL AND closed_at IS NOT NULL AND closed_at >= assigned_at THEN EXTRACT(EPOCH FROM (closed_at - assigned_at)) END), 0),
+		COALESCE(AVG(CASE WHEN assigned_at IS NOT NULL AND assigned_at >= created_at THEN EXTRACT(EPOCH FROM (assigned_at - created_at)) END), 0),
+		COALESCE(AVG(rating), 0),
+		COUNT(rating)
+	FROM conversations
+	WHERE %s AND operator_id != ''
+	GROUP BY operator_id, operator_name, department
+	ORDER BY COUNT(*) DESC;
+	`, whereSQL)
+
+	if rows, err := db.Query(opQuery, args...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var o models.OperatorMetric
+			if err := rows.Scan(&o.OperatorID, &o.OperatorName, &o.Department, &o.TotalTickets, &o.AvgTMASeconds, &o.AvgTMESeconds, &o.AvgRating, &o.RatedCount); err == nil {
+				resp.Operators = append(resp.Operators, o)
+			}
+		}
+	}
+
+	// Volume diário
+	dailyQuery := fmt.Sprintf(`
+	SELECT
+		TO_CHAR(created_at, 'YYYY-MM-DD'),
+		COUNT(*),
+		COUNT(CASE WHEN status = 'closed' THEN 1 END)
+	FROM conversations
+	WHERE %s
+	GROUP BY TO_CHAR(created_at, 'YYYY-MM-DD')
+	ORDER BY 1 ASC;
+	`, whereSQL)
+
+	if rows, err := db.Query(dailyQuery, args...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var day models.DailyVolumeMetric
+			if err := rows.Scan(&day.Date, &day.TotalTickets, &day.ClosedTickets); err == nil {
+				resp.DailyVolume = append(resp.DailyVolume, day)
+			}
+		}
+	}
+
+	return resp, nil
 }
 
 // SaveMessage persiste a mensagem do chat no PostgreSQL
@@ -1272,6 +1662,146 @@ func (db *DB) ResetConversationsAndMessages() error {
 	_, err := db.Exec("DELETE FROM conversations;")
 	return err
 }
+
+// GetPhoneVariants retorna todas as variações possíveis de um número brasileiro no WhatsApp
+// (com 55, sem 55, com 9º dígito e sem 9º dígito)
+func GetPhoneVariants(phone string) []string {
+	clean := regexp.MustCompile(`\D`).ReplaceAllString(phone, "")
+	if len(clean) < 8 {
+		if clean == "" {
+			return nil
+		}
+		return []string{clean}
+	}
+
+	variantsMap := make(map[string]bool)
+	variantsMap[clean] = true
+
+	// Se tem DDI 55
+	if strings.HasPrefix(clean, "55") && len(clean) >= 10 {
+		withoutDDI := clean[2:]
+		variantsMap[withoutDDI] = true
+		if len(withoutDDI) == 10 { // DDD (2) + 8 dígitos (sem 9)
+			ddd := withoutDDI[:2]
+			num := withoutDDI[2:]
+			variantsMap["55"+ddd+"9"+num] = true
+			variantsMap[ddd+"9"+num] = true
+		} else if len(withoutDDI) == 11 && withoutDDI[2] == '9' { // DDD (2) + 9 + 8 dígitos (com 9)
+			ddd := withoutDDI[:2]
+			numWithout9 := withoutDDI[3:]
+			variantsMap["55"+ddd+numWithout9] = true
+			variantsMap[ddd+numWithout9] = true
+		}
+	} else if len(clean) == 10 { // DDD (2) + 8 dígitos sem DDI
+		ddd := clean[:2]
+		num := clean[2:]
+		variantsMap["55"+clean] = true
+		variantsMap["55"+ddd+"9"+num] = true
+		variantsMap[ddd+"9"+num] = true
+	} else if len(clean) == 11 && clean[2] == '9' { // DDD (2) + 9 + 8 dígitos sem DDI
+		ddd := clean[:2]
+		numWithout9 := clean[3:]
+		variantsMap["55"+clean] = true
+		variantsMap["55"+ddd+numWithout9] = true
+		variantsMap[ddd+numWithout9] = true
+	} else if len(clean) == 8 || len(clean) == 9 {
+		variantsMap[clean] = true
+	}
+
+	result := make([]string, 0, len(variantsMap))
+	for v := range variantsMap {
+		result = append(result, v)
+	}
+	return result
+}
+
+// GetActiveConversationByChannel busca uma conversa em andamento ou em espera associada ao canal externo
+// suportando variações de telefone brasileiro (com/sem 55, com/sem 9º dígito)
+func (db *DB) GetActiveConversationByChannel(channel, channelID string) (*models.Conversation, error) {
+	variants := GetPhoneVariants(channelID)
+	if len(variants) == 0 {
+		variants = []string{channelID}
+	}
+
+	isWhatsApp := channel == "whatsapp_evolution" || channel == "whatsapp_official"
+
+	query := `
+	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
+	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
+	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
+	       channel, channel_id, channel_meta
+	FROM conversations
+	WHERE (($1 = false AND channel = $2 AND channel_id = $3 AND status != 'closed')
+	   OR ($1 = true AND (channel = 'whatsapp_evolution' OR channel = 'whatsapp_official')
+	       AND (channel_id = ANY($4) OR REPLACE(client_id, 'wapp-', '') = ANY($4))
+	       AND status != 'closed'))
+	ORDER BY updated_at DESC
+	LIMIT 1;
+	`
+	row := db.QueryRow(query, isWhatsApp, strings.TrimSpace(channel), strings.TrimSpace(channelID), pq.Array(variants))
+	return scanConversationRow(row)
+}
+
+// GetChannelsConfig busca as configurações consolidadas de todos os canais de atendimento
+func (db *DB) GetChannelsConfig() (*models.ChannelsConfig, error) {
+	cfg := &models.ChannelsConfig{
+		Telegram: models.TelegramConfig{
+			Enabled: false,
+			Status:  "disconnected",
+		},
+		WhatsAppOfficial: models.WhatsAppOfficialConfig{
+			Enabled: false,
+			Status:  "disconnected",
+		},
+		WhatsAppEvolution: models.WhatsAppEvolutionConfig{
+			Enabled:      true,
+			ServerURL:    "http://45.166.31.237:8080",
+			ApiKey:       "rr66oi90rr66oi90",
+			InstanceName: "solprovedorgroup",
+			Status:       "connected",
+		},
+	}
+
+	rows, err := db.Query("SELECT key, data FROM channel_configs;")
+	if err != nil {
+		return cfg, nil
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var key string
+		var rawData []byte
+		if err := rows.Scan(&key, &rawData); err != nil {
+			continue
+		}
+		switch key {
+		case "telegram":
+			_ = json.Unmarshal(rawData, &cfg.Telegram)
+		case "whatsapp_official":
+			_ = json.Unmarshal(rawData, &cfg.WhatsAppOfficial)
+		case "whatsapp_evolution":
+			_ = json.Unmarshal(rawData, &cfg.WhatsAppEvolution)
+		}
+	}
+
+	return cfg, nil
+}
+
+// SaveChannelConfig persiste a configuração de um canal específico no PostgreSQL
+func (db *DB) SaveChannelConfig(key string, data interface{}) error {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	query := `
+	INSERT INTO channel_configs (key, data, updated_at)
+	VALUES ($1, $2, NOW())
+	ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW();
+	`
+	_, err = db.Exec(query, key, bytes)
+	return err
+}
+
 
 
 

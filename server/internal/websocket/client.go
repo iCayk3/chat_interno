@@ -27,16 +27,19 @@ const (
 
 // Client representa uma conexão individual de WebSocket
 type Client struct {
-	Hub            *Hub
-	Conn           *websocket.Conn
-	Send           chan []byte
-	ConversationID string
-	SenderID       string
-	SenderName     string
-	SenderType     models.SenderType
-	CpfCnpj        string
-	DeviceID       string
-	ChatService    *services.ChatService
+	Hub             *Hub
+	Conn            *websocket.Conn
+	Send            chan []byte
+	ConversationID  string
+	SenderID        string
+	SenderName      string
+	SenderType      models.SenderType
+	CpfCnpj         string
+	DeviceID        string
+	ChatService     *services.ChatService
+	PushService     *services.PushService
+	CampaignService *services.CampaignService
+	ChannelService  *services.ChannelService
 }
 
 // ReadPump bombeia mensagens do WebSocket para o Hub com validações de segurança
@@ -180,6 +183,21 @@ func (c *Client) handleAction(action *models.WSAction) {
 				Type:    "message",
 				Payload: msg,
 			})
+		} else if c.SenderType == models.SenderOperator {
+			// Despacha a mensagem para canais externos (Telegram, WhatsApp Oficial, WhatsApp Evolution)
+			if conv, err := c.ChatService.GetConversation(targetConvID); err == nil && conv != nil {
+				log.Printf("💬 [OPERATOR MSG] Operador %s respondeu na conversa %s (Canal: %s, ID: %s)", c.SenderName, targetConvID, conv.Channel, conv.ChannelID)
+				if c.ChannelService != nil {
+					c.ChannelService.SendMessageToChannel(conv, msg.Content)
+				}
+				// Se for app mobile e o cliente não estiver com a sala aberta, dispara Push Notification nativo!
+				if c.PushService != nil && c.CampaignService != nil && !c.Hub.HasClientInRoom(targetConvID) {
+					pushToken := c.CampaignService.GetPushTokenByCpfOrDevice(conv.CpfCnpj, conv.ClientID)
+					if pushToken != "" {
+						c.PushService.SendChatMessagePush(pushToken, c.SenderName, msg.Content, targetConvID)
+					}
+				}
+			}
 		}
 
 	case "typing":

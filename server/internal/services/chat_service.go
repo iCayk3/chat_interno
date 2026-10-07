@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -264,7 +265,7 @@ func (s *ChatService) ListConversationsWithFilter(status models.ConversationStat
 	result := make([]*models.Conversation, 0)
 	cleanCpf := strings.TrimSpace(cpfCnpj)
 	for _, conv := range s.conversations {
-		matchesStatus := (status == "" || conv.Status == status)
+		matchesStatus := (status == "" || conv.Status == status || (status == models.ConvClosed && conv.Status == models.ConvWaitingRating))
 		matchesCpf := (cleanCpf == "" || conv.CpfCnpj == cleanCpf)
 		if matchesStatus && matchesCpf {
 			result = append(result, conv)
@@ -280,15 +281,28 @@ func (s *ChatService) AssignOperator(convID, operatorID, operatorName string) (*
 
 	conv, exists := s.conversations[convID]
 	if !exists {
+		if s.db != nil {
+			if dbConv, err := s.db.GetConversationByID(convID); err == nil && dbConv != nil {
+				conv = dbConv
+				s.conversations[convID] = conv
+				exists = true
+			}
+		}
+	}
+	if !exists {
 		return nil, ErrConversationNotFound
 	}
 
+	now := time.Now().UTC()
 	conv.Operator = &models.OperatorInfo{
 		ID:   operatorID,
 		Name: operatorName,
 	}
+	if conv.AssignedAt == nil {
+		conv.AssignedAt = &now
+	}
 	conv.Status = models.ConvActive
-	conv.UpdatedAt = time.Now().UTC()
+	conv.UpdatedAt = now
 
 	// Mensagem de sistema informando entrada do operador
 	sysMsg := &models.Message{
@@ -298,7 +312,7 @@ func (s *ChatService) AssignOperator(convID, operatorID, operatorName string) (*
 		SenderType:     models.SenderSystem,
 		SenderName:     "Sistema SOL",
 		Content:        fmt.Sprintf("O operador %s assumiu o atendimento.", operatorName),
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Timestamp:      now.Format(time.RFC3339),
 		Status:         models.StatusDelivered,
 	}
 	s.messages[convID] = append(s.messages[convID], sysMsg)
@@ -314,16 +328,44 @@ func (s *ChatService) AssignOperator(convID, operatorID, operatorName string) (*
 
 // CloseConversation encerra o atendimento
 func (s *ChatService) CloseConversation(convID string) error {
+	return s.CloseConversationWithDetails(convID, "operator", "")
+}
+
+// CloseConversationWithDetails encerra o atendimento com detalhes de quem fechou e motivo
+func (s *ChatService) CloseConversationWithDetails(convID, closedBy, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	conv, exists := s.conversations[convID]
 	if !exists {
+		if s.db != nil {
+			if dbConv, err := s.db.GetConversationByID(convID); err == nil && dbConv != nil {
+				conv = dbConv
+				s.conversations[convID] = conv
+			}
+		}
+	}
+	if conv == nil {
 		return ErrConversationNotFound
 	}
 
+	now := time.Now().UTC()
 	conv.Status = models.ConvClosed
-	conv.UpdatedAt = time.Now().UTC()
+	conv.UpdatedAt = now
+	conv.ClosedAt = &now
+	if closedBy != "" {
+		conv.ClosedBy = closedBy
+	} else {
+		conv.ClosedBy = "operator"
+	}
+	if reason != "" {
+		conv.CloseReason = reason
+	}
+
+	sysContent := "Atendimento finalizado."
+	if reason != "" {
+		sysContent = reason
+	}
 
 	sysMsg := &models.Message{
 		ID:             "sys-" + uuid.New().String()[:8],
@@ -331,8 +373,8 @@ func (s *ChatService) CloseConversation(convID string) error {
 		SenderID:       "system",
 		SenderType:     models.SenderSystem,
 		SenderName:     "Sistema SOL",
-		Content:        "Atendimento finalizado.",
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Content:        sysContent,
+		Timestamp:      now.Format(time.RFC3339),
 		Status:         models.StatusDelivered,
 	}
 	s.messages[convID] = append(s.messages[convID], sysMsg)
@@ -344,6 +386,94 @@ func (s *ChatService) CloseConversation(convID string) error {
 	}
 
 	return nil
+}
+
+// CloseConversationAndRequestRating coloca a conversa em status 'waiting_rating' e monta a mensagem de encerramento e pesquisa CSAT de 1 a 5
+func (s *ChatService) CloseConversationAndRequestRating(convID, closedBy, reason string) (*models.Conversation, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conv, exists := s.conversations[convID]
+	if !exists {
+		if s.db != nil {
+			if dbConv, err := s.db.GetConversationByID(convID); err == nil && dbConv != nil {
+				conv = dbConv
+				s.conversations[convID] = conv
+			}
+		}
+	}
+	if conv == nil {
+		return nil, "", ErrConversationNotFound
+	}
+
+	now := time.Now().UTC()
+	conv.Status = models.ConvWaitingRating
+	conv.UpdatedAt = now
+	conv.ClosedAt = &now
+	if closedBy != "" {
+		conv.ClosedBy = closedBy
+	} else {
+		conv.ClosedBy = "operator"
+	}
+	if reason != "" {
+		conv.CloseReason = reason
+	}
+
+	opName := "Atendente SOL"
+	if conv.Operator != nil && conv.Operator.Name != "" {
+		opName = conv.Operator.Name
+	}
+
+	// Mensagem padrão para WhatsApp com solicitação de nota de 1 a 5
+	ratingPrompt := fmt.Sprintf("Atendimento encerrado por %s.\n\nPor favor, avalie a qualidade do nosso atendimento enviando uma nota de 1 a 5:\n⭐ 1 - Muito Ruim\n⭐ 2 - Ruim\n⭐ 3 - Regular\n⭐ 4 - Bom\n⭐ 5 - Excelente\n\nSua avaliação é muito importante para nós!", opName)
+
+	sysMsg := &models.Message{
+		ID:             "sys-csat-" + uuid.New().String()[:8],
+		ConversationID: convID,
+		SenderID:       "system",
+		SenderType:     models.SenderSystem,
+		SenderName:     "Sistema SOL",
+		Content:        ratingPrompt,
+		Timestamp:      now.Format(time.RFC3339),
+		Status:         models.StatusDelivered,
+	}
+	s.messages[convID] = append(s.messages[convID], sysMsg)
+
+	if s.db != nil {
+		_ = s.db.UpsertConversation(conv)
+		_ = s.db.SaveMessage(sysMsg)
+	}
+
+	return conv, ratingPrompt, nil
+}
+
+// FinalizePendingRating encerra em definitivo a conversa se o tempo limite de 10 minutos expirar sem avaliação
+func (s *ChatService) FinalizePendingRating(convID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conv, exists := s.conversations[convID]
+	if !exists {
+		if s.db != nil {
+			if dbConv, err := s.db.GetConversationByID(convID); err == nil && dbConv != nil {
+				conv = dbConv
+				s.conversations[convID] = conv
+			}
+		}
+	}
+
+	if conv != nil && conv.Status == models.ConvWaitingRating {
+		now := time.Now().UTC()
+		conv.Status = models.ConvClosed
+		conv.UpdatedAt = now
+		if conv.ClosedAt == nil {
+			conv.ClosedAt = &now
+		}
+		if s.db != nil {
+			_ = s.db.UpsertConversation(conv)
+		}
+		log.Printf("⏱️ [CSAT TIMEOUT] Conversa %s finalizada em definitivo após 10 minutos de tolerância sem resposta do cliente.", convID)
+	}
 }
 
 // ValidateSender verifica autorização de acesso à conversa (Anti-IDOR - Regra 4 de Segurança)
@@ -371,6 +501,17 @@ func (s *ChatService) ValidateSender(convID, senderID string, senderType models.
 }
 
 // SaveMessage persiste mensagem e valida conteúdo (Regra 1 e 8 de Segurança)
+// UpsertMemoryConversation insere ou atualiza a conversa no cache em memória
+func (s *ChatService) UpsertMemoryConversation(conv *models.Conversation) {
+	if conv == nil || conv.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conversations[conv.ID] = conv
+}
+
+// SaveMessage persiste mensagem e atualiza a conversa
 func (s *ChatService) SaveMessage(msg *models.Message) error {
 	cleanContent := models.SanitizeText(msg.Content)
 	if cleanContent == "" {
@@ -396,13 +537,33 @@ func (s *ChatService) SaveMessage(msg *models.Message) error {
 		s.messages[msg.ConversationID] = make([]*models.Message, 0)
 	}
 
-	// Assegura que a conversa existe no histórico (auto-cria se enviada direto do cliente)
+	// Assegura que a conversa existe no histórico
 	conv, convExists := s.conversations[msg.ConversationID]
+	if !convExists {
+		// Busca primeiro no banco antes de criar um placeholder
+		if s.db != nil {
+			if dbConv, err := s.db.GetConversationByID(msg.ConversationID); err == nil && dbConv != nil {
+				conv = dbConv
+				convExists = true
+				s.conversations[msg.ConversationID] = conv
+			}
+		}
+	}
+
 	if !convExists {
 		now := time.Now().UTC()
 		senderName := msg.SenderName
 		if senderName == "" {
 			senderName = "Cliente"
+		}
+		ch := "mobile"
+		chID := ""
+		if strings.HasPrefix(msg.SenderID, "wapp-") {
+			ch = "whatsapp_evolution"
+			chID = strings.TrimPrefix(msg.SenderID, "wapp-")
+		} else if strings.HasPrefix(msg.SenderID, "tg-") {
+			ch = "telegram"
+			chID = strings.TrimPrefix(msg.SenderID, "tg-")
 		}
 		conv = &models.Conversation{
 			ID:          msg.ConversationID,
@@ -411,6 +572,8 @@ func (s *ChatService) SaveMessage(msg *models.Message) error {
 			ContactName: senderName,
 			Department:  "Suporte Técnico",
 			Status:      models.ConvWaiting,
+			Channel:     ch,
+			ChannelID:   chID,
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
@@ -499,6 +662,123 @@ func (s *ChatService) UpdateNetworkInfo(convID, olt, pon, cto string) (*models.C
 	}
 
 	return conv, nil
+}
+
+// RateConversation registra a avaliação de 1 a 5 estrelas e comentário do cliente
+func (s *ChatService) RateConversation(convID string, rating int, comment string) (*models.Conversation, error) {
+	if rating < 1 || rating > 5 {
+		return nil, fmt.Errorf("%w: a avaliação deve ser de 1 a 5 estrelas", ErrInvalidInput)
+	}
+	cleanComment := models.SanitizeText(comment)
+	if len(cleanComment) > 1000 {
+		return nil, fmt.Errorf("%w: comentário não pode exceder 1000 caracteres", ErrInvalidInput)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conv, exists := s.conversations[convID]
+	if !exists {
+		if s.db != nil {
+			if dbConv, err := s.db.GetConversationByID(convID); err == nil && dbConv != nil {
+				conv = dbConv
+				s.conversations[convID] = conv
+			}
+		}
+	}
+	if conv == nil {
+		return nil, ErrConversationNotFound
+	}
+
+	now := time.Now().UTC()
+	conv.Rating = &rating
+	conv.RatingComment = cleanComment
+	conv.RatedAt = &now
+	conv.UpdatedAt = now
+	conv.Status = models.ConvClosed
+	if conv.ClosedAt == nil {
+		conv.ClosedAt = &now
+	}
+
+	// Mensagem no histórico com a avaliação
+	ratingMsg := &models.Message{
+		ID:             "sys-rate-" + uuid.New().String()[:8],
+		ConversationID: convID,
+		SenderID:       "system",
+		SenderType:     models.SenderSystem,
+		SenderName:     "Sistema SOL",
+		Content:        fmt.Sprintf("⭐ Atendimento avaliado com nota %d/5 pelo cliente.", rating),
+		Timestamp:      now.Format(time.RFC3339),
+		Status:         models.StatusDelivered,
+	}
+	s.messages[convID] = append(s.messages[convID], ratingMsg)
+
+	if s.db != nil {
+		_ = s.db.SaveMessage(ratingMsg)
+		_ = s.db.UpsertConversation(conv)
+		if err := s.db.SaveConversationRating(convID, rating, cleanComment); err != nil {
+			return nil, err
+		}
+	}
+
+	return conv, nil
+}
+
+// SearchConversations busca atendimentos históricos com múltiplos filtros
+func (s *ChatService) SearchConversations(filter models.SearchConversationsFilter) (*models.SearchConversationsResponse, error) {
+	if s.db != nil {
+		list, total, err := s.db.SearchConversations(filter)
+		if err != nil {
+			return nil, err
+		}
+		return &models.SearchConversationsResponse{
+			Conversations: list,
+			Total:         total,
+			Limit:         filter.Limit,
+			Offset:        filter.Offset,
+		}, nil
+	}
+
+	// Fallback se DB não estiver conectado
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	all := make([]*models.Conversation, 0)
+	for _, conv := range s.conversations {
+		all = append(all, conv)
+	}
+	return &models.SearchConversationsResponse{
+		Conversations: all,
+		Total:         len(all),
+		Limit:         filter.Limit,
+		Offset:        filter.Offset,
+	}, nil
+}
+
+// GetReportsSummary consolida métricas gerenciais (TMA, TME, CSAT, por setor e atendente)
+func (s *ChatService) GetReportsSummary(filter models.ReportMetricsFilter) (*models.ReportSummaryResponse, error) {
+	if s.db != nil {
+		return s.db.GetReportsSummary(filter)
+	}
+	return &models.ReportSummaryResponse{
+		RatingDistribution: make(map[string]int),
+		Departments:        make([]models.DepartmentMetric, 0),
+		Operators:          make([]models.OperatorMetric, 0),
+		DailyVolume:        make([]models.DailyVolumeMetric, 0),
+	}, nil
+}
+
+// GetConversationFull busca a conversa e todas as mensagens
+func (s *ChatService) GetConversationFull(convID string) (*models.Conversation, []*models.Message, error) {
+	conv, err := s.GetConversation(convID)
+	if err != nil {
+		return nil, nil, err
+	}
+	msgs, err := s.GetMessages(convID, 500)
+	if err != nil {
+		msgs = make([]*models.Message, 0)
+	}
+	return conv, msgs, nil
 }
 
 

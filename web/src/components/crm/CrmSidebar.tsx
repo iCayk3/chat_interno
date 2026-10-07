@@ -20,6 +20,7 @@ import {
   ShieldCheck,
   LogOut,
   Network,
+  Search,
 } from 'lucide-react';
 import type { CrmMenuId, UserRole, AuthUser } from '../../types/crm';
 
@@ -101,6 +102,18 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
           id: 'empresa_departamentos',
           label: 'Departamentos',
           icon: Layers,
+          allowedRoles: ['gestor', 'admin'],
+        },
+        {
+          id: 'empresa_atendimentos',
+          label: 'Consulta de Atendimentos',
+          icon: Search,
+          allowedRoles: ['operador', 'gestor', 'admin'],
+        },
+        {
+          id: 'empresa_relatorios',
+          label: 'Relatórios & Métricas',
+          icon: BarChart3,
           allowedRoles: ['gestor', 'admin'],
         },
       ],

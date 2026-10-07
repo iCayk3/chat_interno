@@ -27,6 +27,8 @@ type Handler struct {
 	fileService     *services.FileService
 	campaignService *services.CampaignService
 	networkService  *services.NetworkService
+	pushService     *services.PushService
+	channelService  *services.ChannelService
 	db              *database.DB
 	hub             *ws.Hub
 	upgrader        websocket.Upgrader
@@ -40,6 +42,8 @@ func NewHandler(
 	fileService *services.FileService,
 	campaignService *services.CampaignService,
 	networkService *services.NetworkService,
+	pushService *services.PushService,
+	channelService *services.ChannelService,
 	db *database.DB,
 	hub *ws.Hub,
 	allowedOrigins []string,
@@ -70,6 +74,8 @@ func NewHandler(
 		fileService:     fileService,
 		campaignService: campaignService,
 		networkService:  networkService,
+		pushService:     pushService,
+		channelService:  channelService,
 		db:              db,
 		hub:             hub,
 		upgrader:        upgrader,
@@ -159,16 +165,19 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &ws.Client{
-		Hub:            h.hub,
-		Conn:           conn,
-		Send:           make(chan []byte, 256),
-		ConversationID: convID,
-		SenderID:       clientID,
-		SenderName:     senderDisplayName,
-		SenderType:     sType,
-		CpfCnpj:        cleanCpfDigits,
-		DeviceID:       deviceID,
-		ChatService:    h.chatService,
+		Hub:             h.hub,
+		Conn:            conn,
+		Send:            make(chan []byte, 256),
+		ConversationID:  convID,
+		SenderID:        clientID,
+		SenderName:      senderDisplayName,
+		SenderType:      sType,
+		CpfCnpj:         cleanCpfDigits,
+		DeviceID:        deviceID,
+		ChatService:     h.chatService,
+		PushService:     h.pushService,
+		CampaignService: h.campaignService,
+		ChannelService:  h.channelService,
 	}
 
 	h.hub.RegisterClient(client)
@@ -212,6 +221,267 @@ func (h *Handler) HandleCreateConversation(w http.ResponseWriter, r *http.Reques
 	})
 
 	h.respondJSON(w, http.StatusCreated, conv)
+}
+
+// HandleStartOutboundConversation inicia um atendimento avulso (outbound) a partir do painel do operador
+func (h *Handler) HandleStartOutboundConversation(w http.ResponseWriter, r *http.Request) {
+	var req models.StartOutboundChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido"})
+		return
+	}
+
+	cleanClientName := models.SanitizeText(req.ClientName)
+	if cleanClientName == "" {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Nome do cliente é obrigatório"})
+		return
+	}
+
+	cleanChannel := strings.ToLower(strings.TrimSpace(req.Channel))
+	if cleanChannel == "" {
+		cleanChannel = "whatsapp_evolution"
+	}
+
+	// Normalização do identificador do canal (número de telefone, chat ID, etc.)
+	cleanChannelID := strings.TrimSpace(req.ChannelID)
+	cleanChannelID = strings.ReplaceAll(cleanChannelID, "+", "")
+	cleanChannelID = strings.ReplaceAll(cleanChannelID, " ", "")
+	cleanChannelID = strings.ReplaceAll(cleanChannelID, "-", "")
+	cleanChannelID = strings.ReplaceAll(cleanChannelID, "(", "")
+	cleanChannelID = strings.ReplaceAll(cleanChannelID, ")", "")
+	cleanChannelID = strings.ReplaceAll(cleanChannelID, "@s.whatsapp.net", "")
+	cleanChannelID = strings.ReplaceAll(cleanChannelID, "@c.us", "")
+
+	if cleanChannelID == "" {
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Identificador do destinatário (telefone/ID) é obrigatório"})
+		return
+	}
+
+	// Se for WhatsApp (Evolution ou Oficial) e for número brasileiro sem DDI, adiciona 55
+	if (cleanChannel == "whatsapp_evolution" || cleanChannel == "whatsapp_official") && (len(cleanChannelID) == 10 || len(cleanChannelID) == 11) {
+		cleanChannelID = "55" + cleanChannelID
+	}
+
+	opID := strings.TrimSpace(req.OperatorID)
+	opName := strings.TrimSpace(req.OperatorName)
+	if opID == "" {
+		opID = "usr-op-01"
+	}
+	if opName == "" {
+		opName = "Atendente SOL"
+	}
+
+	contactName := models.SanitizeText(req.ContactName)
+	if contactName == "" {
+		contactName = cleanClientName
+	}
+
+	dept := models.SanitizeText(req.Department)
+	if dept == "" {
+		dept = "Suporte Técnico"
+	}
+
+	var renderedMessageText string
+
+	// 1. Validação e despacho conforme canal selecionado
+	switch cleanChannel {
+	case "whatsapp_official":
+		// Na API Oficial da Meta, o início ativo de conversa FORA da janela de 24h EXIGE template autorizado
+		cleanTemplate := strings.TrimSpace(req.TemplateName)
+		if cleanTemplate == "" {
+			h.respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "Para iniciar atendimento via WhatsApp Oficial (Meta), a seleção de um template pré-aprovado é obrigatória.",
+			})
+			return
+		}
+		lang := strings.TrimSpace(req.TemplateLanguage)
+		if lang == "" {
+			lang = "pt_BR"
+		}
+		cfg, _ := h.channelService.GetChannelsConfig()
+		phoneID := ""
+		token := ""
+		if cfg != nil {
+			phoneID = cfg.WhatsAppOfficial.PhoneNumberID
+			token = cfg.WhatsAppOfficial.AccessToken
+		}
+
+		rendered, err := h.channelService.SendWhatsAppOfficialTemplate(phoneID, token, cleanChannelID, cleanTemplate, lang, req.TemplateParams)
+		if err != nil {
+			log.Printf("⚠️ [OUTBOUND WHATSAPP OFICIAL ERRO] %v", err)
+			if !strings.Contains(err.Error(), "não configuradas") {
+				h.respondJSON(w, http.StatusBadRequest, map[string]string{
+					"error": fmt.Sprintf("Erro ao enviar template na Meta Cloud API: %v", err),
+				})
+				return
+			}
+		}
+		renderedMessageText = rendered
+
+	case "whatsapp_evolution":
+		// Canal não oficial: mensagem de texto livre como o atendente desejar
+		cleanMsg := strings.TrimSpace(req.InitialMessage)
+		if cleanMsg == "" {
+			h.respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "A mensagem inicial para o WhatsApp é obrigatória.",
+			})
+			return
+		}
+		cfg, _ := h.channelService.GetChannelsConfig()
+		serverURL := "http://45.166.31.237:8080"
+		apiKey := "rr66oi90rr66oi90"
+		instanceName := "solprovedorgroup"
+		if cfg != nil {
+			if cfg.WhatsAppEvolution.ServerURL != "" {
+				serverURL = cfg.WhatsAppEvolution.ServerURL
+			}
+			if cfg.WhatsAppEvolution.ApiKey != "" {
+				apiKey = cfg.WhatsAppEvolution.ApiKey
+			}
+			if cfg.WhatsAppEvolution.InstanceName != "" {
+				instanceName = cfg.WhatsAppEvolution.InstanceName
+			}
+		}
+
+		if err := h.channelService.SendEvolutionMessage(serverURL, apiKey, instanceName, cleanChannelID, cleanMsg); err != nil {
+			log.Printf("⚠️ [OUTBOUND EVOLUTION ERRO] %v", err)
+			h.respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("Erro ao enviar mensagem pelo Evolution API: %v", err),
+			})
+			return
+		}
+		renderedMessageText = cleanMsg
+
+	case "telegram":
+		cleanMsg := strings.TrimSpace(req.InitialMessage)
+		if cleanMsg == "" {
+			h.respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "A mensagem inicial para o Telegram é obrigatória.",
+			})
+			return
+		}
+		cfg, _ := h.channelService.GetChannelsConfig()
+		botToken := ""
+		if cfg != nil {
+			botToken = cfg.Telegram.BotToken
+		}
+		if err := h.channelService.SendTelegramMessage(botToken, cleanChannelID, cleanMsg); err != nil {
+			log.Printf("⚠️ [OUTBOUND TELEGRAM ERRO] %v", err)
+			h.respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("Erro ao enviar mensagem pelo Telegram: %v", err),
+			})
+			return
+		}
+		renderedMessageText = cleanMsg
+
+	case "mobile", "web":
+		cleanMsg := strings.TrimSpace(req.InitialMessage)
+		if cleanMsg == "" {
+			h.respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "A mensagem inicial é obrigatória.",
+			})
+			return
+		}
+		renderedMessageText = cleanMsg
+
+	default:
+		h.respondJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Canal de atendimento não suportado: " + cleanChannel,
+		})
+		return
+	}
+
+	// 2. Criação ou reaproveitamento do atendimento avulso (se já houver conversa ativa)
+	now := time.Now().UTC()
+	var conv *models.Conversation
+	if h.db != nil {
+		conv, _ = h.db.GetActiveConversationByChannel(cleanChannel, cleanChannelID)
+	}
+
+	if conv == nil {
+		prefix := "conv-out-"
+		clientID := "out-" + cleanChannelID
+		if cleanChannel == "whatsapp_evolution" || cleanChannel == "whatsapp_official" {
+			prefix = "conv-wapp-"
+			clientID = "wapp-" + cleanChannelID
+		} else if cleanChannel == "telegram" {
+			prefix = "conv-tg-"
+			clientID = "tg-" + cleanChannelID
+		}
+		convID := prefix + uuid.New().String()[:8]
+		conv = &models.Conversation{
+			ID:          convID,
+			ClientID:    clientID,
+			ClientName:  cleanClientName,
+			ContactName: contactName,
+			CpfCnpj:     models.SanitizeText(req.CpfCnpj),
+			Department:  dept,
+			Status:      models.ConvActive,
+			Operator: &models.OperatorInfo{
+				ID:   opID,
+				Name: opName,
+			},
+			CreatedAt:  now,
+			UpdatedAt:  now,
+			AssignedAt: &now,
+			Channel:    cleanChannel,
+			ChannelID:  cleanChannelID,
+		}
+	} else {
+		// Reaproveita a conversa ativa, atualizando operador e status
+		conv.Status = models.ConvActive
+		conv.Operator = &models.OperatorInfo{
+			ID:   opID,
+			Name: opName,
+		}
+		conv.AssignedAt = &now
+		conv.UpdatedAt = now
+		if cleanClientName != "" {
+			conv.ClientName = cleanClientName
+		}
+	}
+
+	// Persiste no banco de dados e memória
+	if h.db != nil {
+		_ = h.db.UpsertConversation(conv)
+	}
+	h.chatService.UpsertMemoryConversation(conv)
+
+	// 3. Registra a primeira mensagem do operador
+	msgID := "msg-out-" + uuid.New().String()[:8]
+	msg := &models.Message{
+		ID:             msgID,
+		ConversationID: conv.ID,
+		SenderID:       opID,
+		SenderName:     opName,
+		SenderType:     models.SenderOperator,
+		Content:        renderedMessageText,
+		Timestamp:      now.Format(time.RFC3339),
+		Status:         models.StatusDelivered,
+	}
+
+	_ = h.chatService.SaveMessage(msg)
+
+	// 4. Notifica operadores via WebSocket em tempo real
+	h.hub.BroadcastToOperators(&models.WSAction{
+		Type:    "conversation_updated",
+		Payload: conv,
+	})
+	h.hub.BroadcastToOperators(&models.WSAction{
+		Type:    "message",
+		Payload: msg,
+	})
+	h.hub.BroadcastToRoom(conv.ID, &models.WSAction{
+		Type:    "message",
+		Payload: msg,
+	}, nil)
+
+	log.Printf("🚀 [OUTBOUND CHAT] Atendimento avulso iniciado por %s para %s via %s (ID: %s)", opName, cleanClientName, cleanChannel, conv.ID)
+
+	h.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"conversation": conv,
+		"message":      msg,
+	})
 }
 
 // HandleListConversations lista conversas ativas ou em espera com filtro opcional de CPF
@@ -310,10 +580,82 @@ func (h *Handler) HandleCloseConversation(w http.ResponseWriter, r *http.Request
 	id := chi.URLParam(r, "id")
 
 	var body struct {
-		Reason string `json:"reason"`
+		Reason   string `json:"reason"`
+		ClosedBy string `json:"closedBy"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
+	conv, err := h.chatService.GetConversation(id)
+	if err != nil || conv == nil {
+		h.respondJSON(w, http.StatusNotFound, map[string]string{"error": "Conversa não encontrada"})
+		return
+	}
+
+	closedBy := strings.TrimSpace(body.ClosedBy)
+	if closedBy == "" {
+		if conv.Operator != nil && conv.Operator.Name != "" {
+			closedBy = conv.Operator.Name
+		} else {
+			closedBy = "Atendente SOL"
+		}
+	}
+
+	isWhatsApp := conv.Channel == "whatsapp_evolution" || conv.Channel == "whatsapp_official"
+
+	if isWhatsApp {
+		// Se for WhatsApp, coloca a conversa em 'waiting_rating' e envia mensagem solicitando nota de 1 a 5
+		updatedConv, ratingPrompt, err := h.chatService.CloseConversationAndRequestRating(id, closedBy, body.Reason)
+		if err != nil {
+			h.respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Envia a mensagem com a solicitação de nota diretamente no WhatsApp do cliente!
+		if h.channelService != nil {
+			h.channelService.SendMessageToChannel(updatedConv, ratingPrompt)
+		}
+
+		// Notifica via WebSocket para que os operadores vejam a conversa na aba de Finalizados / Aguardando Nota
+		h.hub.BroadcastToRoom(id, &models.WSAction{
+			Type: "chat_closed",
+			Payload: map[string]string{
+				"conversationId": id,
+				"reason":         ratingPrompt,
+			},
+		}, nil)
+		h.hub.BroadcastToOperators(&models.WSAction{
+			Type:    "conversation_updated",
+			Payload: updatedConv,
+		})
+		h.hub.BroadcastToOperators(&models.WSAction{
+			Type: "chat_closed",
+			Payload: map[string]string{
+				"conversationId": id,
+				"reason":         ratingPrompt,
+			},
+		})
+
+		// Tolerância de 10 minutos para o cliente avaliar. Se não responder em 10 minutos, encerra de vez!
+		go func(cID string) {
+			time.Sleep(10 * time.Minute)
+			h.chatService.FinalizePendingRating(cID)
+			// Notifica os operadores da finalização definitiva
+			if finalConv, err := h.chatService.GetConversation(cID); err == nil && finalConv != nil {
+				h.hub.BroadcastToOperators(&models.WSAction{
+					Type:    "conversation_updated",
+					Payload: finalConv,
+				})
+			}
+		}(id)
+
+		h.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"message":      "Atendimento encerrado e pesquisa de satisfação enviada ao cliente via WhatsApp (aguardando avaliação por até 10 minutos)",
+			"conversation": updatedConv,
+		})
+		return
+	}
+
+	// Para outros canais (app mobile, web): encerra normalmente
 	if err := h.chatService.CloseConversation(id); err != nil {
 		h.respondJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return

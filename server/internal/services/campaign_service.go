@@ -556,3 +556,54 @@ func matchAny(value string, tokens []string) bool {
 	}
 	return false
 }
+
+// GetPushTokensForNotifications retorna todos os tokens de push Expo associados aos destinatários das notificações
+func (s *CampaignService) GetPushTokensForNotifications(notifs []*models.ClientNotification) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	tokenSet := make(map[string]bool)
+	for _, n := range notifs {
+		if n.DeviceID != "" {
+			if dev, ok := s.devices[n.DeviceID]; ok && dev.PushToken != "" {
+				tokenSet[dev.PushToken] = true
+			}
+		}
+		if n.CpfCnpj != "" {
+			for _, dev := range s.devices {
+				if dev.CpfCnpj == n.CpfCnpj && dev.PushToken != "" {
+					tokenSet[dev.PushToken] = true
+				}
+			}
+		}
+	}
+
+	result := make([]string, 0, len(tokenSet))
+	for t := range tokenSet {
+		result = append(result, t)
+	}
+	return result
+}
+
+// GetPushTokenByCpfOrDevice busca o token de push do cliente por CPF ou DeviceID
+func (s *CampaignService) GetPushTokenByCpfOrDevice(cpf, deviceID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if deviceID != "" {
+		if dev, ok := s.devices[deviceID]; ok && dev.PushToken != "" {
+			return dev.PushToken
+		}
+	}
+
+	cleanCpf := cleanDigits(cpf)
+	if cleanCpf != "" {
+		for _, dev := range s.devices {
+			if dev.CpfCnpj == cleanCpf && dev.PushToken != "" {
+				return dev.PushToken
+			}
+		}
+	}
+
+	return ""
+}

@@ -122,6 +122,11 @@ func (h *Hub) BroadcastToRoom(conversationID string, action *models.WSAction, se
 	}
 }
 
+// BroadcastToConversation envia mensagem para a sala sem ignorar nenhum remetente
+func (h *Hub) BroadcastToConversation(conversationID string, action *models.WSAction) {
+	h.BroadcastToRoom(conversationID, action, nil)
+}
+
 // BroadcastToOperators notifica todos os operadores (ex: novo chamado na fila ou mensagem global),
 // permitindo excluir operadores que já estejam na sala especificada para evitar duplicidade de mensagens
 func (h *Hub) BroadcastToOperators(action *models.WSAction, excludeConversationID ...string) {
@@ -219,6 +224,23 @@ func (h *Hub) BroadcastToClientCpf(cpf string, action *models.WSAction) {
 			}
 		}
 	}
+}
+
+// HasClientInRoom verifica se há pelo menos um cliente conectado ativamente na sala
+func (h *Hub) HasClientInRoom(conversationID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	room, exists := h.rooms[conversationID]
+	if !exists {
+		return false
+	}
+	for client := range room {
+		if client.SenderType == models.SenderClient {
+			return true
+		}
+	}
+	return false
 }
 
 

@@ -73,10 +73,18 @@ func (h *Handler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	user := h.extractAuthUser(r)
-	if user == nil || (user.Role != models.RoleAdmin && user.Role != models.RoleGestor) {
+	if user == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Sessão inválida ou expirada. Faça login novamente.",
+		})
+		return
+	}
+
+	if user.Role != models.RoleAdmin && user.Role != models.RoleGestor {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]string{
-			"error": "Acesso negado. Apenas gestores e administradores podem listar atendentes.",
+			"error": "Acesso negado. Apenas gestores e administradores podem listar atendentes e usuários.",
 		})
 		return
 	}
@@ -113,7 +121,15 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	user := h.extractAuthUser(r)
-	if user == nil || (user.Role != models.RoleAdmin && user.Role != models.RoleGestor) {
+	if user == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Sessão inválida ou expirada. Faça login novamente.",
+		})
+		return
+	}
+
+	if user.Role != models.RoleAdmin && user.Role != models.RoleGestor {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]string{
 			"error": "Acesso negado. Apenas gestores e administradores podem cadastrar atendentes.",
@@ -162,7 +178,15 @@ func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	user := h.extractAuthUser(r)
-	if user == nil || (user.Role != models.RoleAdmin && user.Role != models.RoleGestor) {
+	if user == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Sessão inválida ou expirada. Faça login novamente.",
+		})
+		return
+	}
+
+	if user.Role != models.RoleAdmin && user.Role != models.RoleGestor {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]string{
 			"error": "Acesso negado. Apenas gestores e administradores podem editar atendentes.",

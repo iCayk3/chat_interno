@@ -269,9 +269,17 @@ export const UsuariosGerenciaView: React.FC = () => {
       )}
 
       {errorMessage && (
-        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2.5 animate-in fade-in duration-150">
-          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-          <span className="font-medium">{errorMessage}</span>
+        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-2.5 animate-in fade-in duration-150">
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span className="font-medium">{errorMessage}</span>
+          </div>
+          <button
+            onClick={loadUsers}
+            className="px-3 py-1 bg-rose-100 hover:bg-rose-200 text-rose-900 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+          >
+            Tentar novamente
+          </button>
         </div>
       )}
 

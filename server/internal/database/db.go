@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -212,15 +213,130 @@ func (db *DB) runMigrations() error {
 		data JSONB NOT NULL,
 		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 	);
+
+	-- Configurações Globais do Sistema e Modos de Trabalho (ERP vs Nativo vs Híbrido)
+	CREATE TABLE IF NOT EXISTS system_settings (
+		key VARCHAR(64) PRIMARY KEY,
+		operation_mode VARCHAR(32) NOT NULL DEFAULT 'erp',
+		setup_completed BOOLEAN NOT NULL DEFAULT FALSE,
+		company_name VARCHAR(150) DEFAULT 'SOL Provedor de Internet',
+		company_cnpj VARCHAR(32) DEFAULT '',
+		company_phone VARCHAR(32) DEFAULT '',
+		company_email VARCHAR(150) DEFAULT '',
+		mercadopago_access_token TEXT DEFAULT '',
+		mercadopago_public_key TEXT DEFAULT '',
+		mercadopago_webhook_secret TEXT DEFAULT '',
+		mercadopago_sandbox BOOLEAN DEFAULT TRUE,
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	-- Planos e Serviços Nativos (Modo Banco Próprio)
+	CREATE TABLE IF NOT EXISTS native_plans (
+		id VARCHAR(64) PRIMARY KEY,
+		name VARCHAR(150) NOT NULL,
+		description TEXT DEFAULT '',
+		price NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+		billing_cycle VARCHAR(32) NOT NULL DEFAULT 'mensal',
+		speed_download VARCHAR(50) DEFAULT '',
+		speed_upload VARCHAR(50) DEFAULT '',
+		active BOOLEAN NOT NULL DEFAULT TRUE,
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	-- Clientes da Base Nativa do Sistema
+	CREATE TABLE IF NOT EXISTS native_customers (
+		id VARCHAR(64) PRIMARY KEY,
+		name VARCHAR(150) NOT NULL,
+		cpf_cnpj VARCHAR(32) UNIQUE NOT NULL,
+		email VARCHAR(150) DEFAULT '',
+		phone VARCHAR(32) DEFAULT '',
+		address TEXT DEFAULT '',
+		number VARCHAR(32) DEFAULT '',
+		complement VARCHAR(100) DEFAULT '',
+		neighborhood VARCHAR(100) DEFAULT '',
+		city VARCHAR(100) DEFAULT '',
+		state VARCHAR(10) DEFAULT '',
+		postal_code VARCHAR(20) DEFAULT '',
+		plan_id VARCHAR(64) REFERENCES native_plans(id) ON DELETE SET NULL,
+		monthly_price NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+		due_day INT NOT NULL DEFAULT 10,
+		status VARCHAR(32) NOT NULL DEFAULT 'active',
+		notes TEXT DEFAULT '',
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_native_customers_cpf ON native_customers(cpf_cnpj);
+	CREATE INDEX IF NOT EXISTS idx_native_customers_status ON native_customers(status);
+
+	-- Faturas e Cobranças com Integração Mercado Pago (Pix e Boleto)
+	CREATE TABLE IF NOT EXISTS native_invoices (
+		id VARCHAR(64) PRIMARY KEY,
+		customer_id VARCHAR(64) NOT NULL REFERENCES native_customers(id) ON DELETE CASCADE,
+		cpf_cnpj VARCHAR(32) NOT NULL,
+		amount NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+		due_date DATE NOT NULL,
+		status VARCHAR(32) NOT NULL DEFAULT 'pending',
+		description TEXT DEFAULT '',
+		payment_method VARCHAR(32) NOT NULL DEFAULT 'pix',
+		mp_payment_id VARCHAR(64) DEFAULT '',
+		pix_qr_code TEXT DEFAULT '',
+		pix_qr_code_base64 TEXT DEFAULT '',
+		boleto_url TEXT DEFAULT '',
+		boleto_barcode TEXT DEFAULT '',
+		paid_at TIMESTAMP WITH TIME ZONE,
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_native_invoices_customer ON native_invoices(customer_id);
+	CREATE INDEX IF NOT EXISTS idx_native_invoices_cpf ON native_invoices(cpf_cnpj);
+	CREATE INDEX IF NOT EXISTS idx_native_invoices_status ON native_invoices(status);
+	CREATE INDEX IF NOT EXISTS idx_native_invoices_mp ON native_invoices(mp_payment_id);
+
+	-- Licenciamento do Sistema (Controle de Ativação, Trial, Descontos e Bloqueio)
+	CREATE TABLE IF NOT EXISTS system_license (
+		id INT PRIMARY KEY DEFAULT 1,
+		license_key VARCHAR(120) NOT NULL DEFAULT '',
+		tenant_cnpj VARCHAR(32) DEFAULT '',
+		tenant_name VARCHAR(150) DEFAULT '',
+		license_type VARCHAR(32) NOT NULL DEFAULT 'trial',
+		status VARCHAR(32) NOT NULL DEFAULT 'trial',
+		trial_days_remaining INT NOT NULL DEFAULT 30,
+		expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+		grace_period_until TIMESTAMP WITH TIME ZONE NOT NULL,
+		last_heartbeat_at TIMESTAMP WITH TIME ZONE,
+		max_operators INT NOT NULL DEFAULT 10,
+		allowed_modules VARCHAR(150) NOT NULL DEFAULT 'erp,native,omnichannel',
+		suspension_reason TEXT DEFAULT '',
+		payment_pix TEXT DEFAULT '',
+		payment_qr_code_base64 TEXT DEFAULT '',
+		payment_amount NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+		discount_description TEXT DEFAULT '',
+		discount_amount NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+		contact_support_phone VARCHAR(50) DEFAULT '',
+		contact_support_email VARCHAR(150) DEFAULT '',
+		signature TEXT DEFAULT '',
+		allowed_operation_mode VARCHAR(32) NOT NULL DEFAULT 'hybrid',
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	);
 	`
 
 	if _, err := db.Exec(query); err != nil {
 		return err
 	}
 
+	_, _ = db.Exec("ALTER TABLE system_license ADD COLUMN IF NOT EXISTS allowed_operation_mode VARCHAR(32) NOT NULL DEFAULT 'hybrid';")
+
 	// Semeia configurações padrões (mensagem de encerramento e fluxo visual)
 	if err := db.seedDefaultSettings(); err != nil {
 		return err
+	}
+
+	// Semeia licença inicial em modo demonstração / trial de 30 dias se não existir
+	if err := db.seedDefaultLicense(); err != nil {
+		log.Println("⚠️ Aviso ao semear licença inicial:", err)
 	}
 
 	// Semeia rede FTTH padrão se estiver vazia
@@ -1853,6 +1969,601 @@ func (db *DB) GetAbandonedBotConversations(cutoff time.Time) ([]*models.Conversa
 	}
 	return list, nil
 }
+
+// ============================================================================
+// SYSTEM SETTINGS & OPERATION MODES (ERP vs NATIVO vs HÍBRIDO)
+// ============================================================================
+
+func (db *DB) GetSystemSettings() (*models.SystemSettings, error) {
+	query := `
+	SELECT operation_mode, setup_completed, company_name, company_cnpj, company_phone, company_email,
+	       mercadopago_access_token, mercadopago_public_key, mercadopago_webhook_secret, mercadopago_sandbox, updated_at
+	FROM system_settings
+	WHERE key = 'global'
+	LIMIT 1;
+	`
+	row := db.QueryRow(query)
+	var s models.SystemSettings
+	var opMode string
+	err := row.Scan(
+		&opMode, &s.SetupCompleted, &s.CompanyName, &s.CompanyCNPJ, &s.CompanyPhone, &s.CompanyEmail,
+		&s.MercadoPago.AccessToken, &s.MercadoPago.PublicKey, &s.MercadoPago.WebhookSecret, &s.MercadoPago.Sandbox, &s.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		// Padrão inicial caso não haja registro: ERP como padrão para retrocompatibilidade
+		return &models.SystemSettings{
+			OperationMode:  models.OperationModeERP,
+			SetupCompleted: false,
+			CompanyName:    "SOL Provedor de Internet",
+			MercadoPago: models.MercadoPagoConfig{
+				Sandbox: true,
+			},
+			UpdatedAt: time.Now().UTC(),
+		}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.OperationMode = models.OperationMode(opMode)
+	s.MercadoPago.Configured = s.MercadoPago.AccessToken != ""
+	return &s, nil
+}
+
+func (db *DB) SaveSystemSettings(s *models.SystemSettings) error {
+	query := `
+	INSERT INTO system_settings (
+		key, operation_mode, setup_completed, company_name, company_cnpj, company_phone, company_email,
+		mercadopago_access_token, mercadopago_public_key, mercadopago_webhook_secret, mercadopago_sandbox, updated_at
+	) VALUES (
+		'global', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()
+	)
+	ON CONFLICT (key) DO UPDATE SET
+		operation_mode = EXCLUDED.operation_mode,
+		setup_completed = EXCLUDED.setup_completed,
+		company_name = EXCLUDED.company_name,
+		company_cnpj = EXCLUDED.company_cnpj,
+		company_phone = EXCLUDED.company_phone,
+		company_email = EXCLUDED.company_email,
+		mercadopago_access_token = CASE WHEN EXCLUDED.mercadopago_access_token <> '' THEN EXCLUDED.mercadopago_access_token ELSE system_settings.mercadopago_access_token END,
+		mercadopago_public_key = EXCLUDED.mercadopago_public_key,
+		mercadopago_webhook_secret = CASE WHEN EXCLUDED.mercadopago_webhook_secret <> '' THEN EXCLUDED.mercadopago_webhook_secret ELSE system_settings.mercadopago_webhook_secret END,
+		mercadopago_sandbox = EXCLUDED.mercadopago_sandbox,
+		updated_at = NOW();
+	`
+	_, err := db.Exec(
+		query,
+		string(s.OperationMode), s.SetupCompleted, s.CompanyName, s.CompanyCNPJ, s.CompanyPhone, s.CompanyEmail,
+		s.MercadoPago.AccessToken, s.MercadoPago.PublicKey, s.MercadoPago.WebhookSecret, s.MercadoPago.Sandbox,
+	)
+	return err
+}
+
+// ============================================================================
+// NATIVE PLANS (PRODUTOS / SERVIÇOS / PLANOS CONTRATADOS)
+// ============================================================================
+
+func (db *DB) ListNativePlans() ([]models.NativePlan, error) {
+	query := `
+	SELECT id, name, description, price, billing_cycle, speed_download, speed_upload, active, created_at, updated_at
+	FROM native_plans
+	ORDER BY price ASC, name ASC;
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	plans := make([]models.NativePlan, 0)
+	for rows.Next() {
+		var p models.NativePlan
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.BillingCycle, &p.SpeedDownload, &p.SpeedUpload, &p.Active, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			continue
+		}
+		plans = append(plans, p)
+	}
+	return plans, nil
+}
+
+func (db *DB) GetNativePlan(id string) (*models.NativePlan, error) {
+	query := `
+	SELECT id, name, description, price, billing_cycle, speed_download, speed_upload, active, created_at, updated_at
+	FROM native_plans
+	WHERE id = $1;
+	`
+	var p models.NativePlan
+	err := db.QueryRow(query, id).Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.BillingCycle, &p.SpeedDownload, &p.SpeedUpload, &p.Active, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (db *DB) CreateNativePlan(p *models.NativePlan) error {
+	query := `
+	INSERT INTO native_plans (id, name, description, price, billing_cycle, speed_download, speed_upload, active, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW());
+	`
+	_, err := db.Exec(query, p.ID, p.Name, p.Description, p.Price, p.BillingCycle, p.SpeedDownload, p.SpeedUpload, p.Active)
+	return err
+}
+
+func (db *DB) UpdateNativePlan(p *models.NativePlan) error {
+	query := `
+	UPDATE native_plans
+	SET name = $2, description = $3, price = $4, billing_cycle = $5, speed_download = $6, speed_upload = $7, active = $8, updated_at = NOW()
+	WHERE id = $1;
+	`
+	_, err := db.Exec(query, p.ID, p.Name, p.Description, p.Price, p.BillingCycle, p.SpeedDownload, p.SpeedUpload, p.Active)
+	return err
+}
+
+func (db *DB) DeleteNativePlan(id string) error {
+	// Soft delete ou inativação para manter integridade com clientes existentes
+	query := `UPDATE native_plans SET active = FALSE, updated_at = NOW() WHERE id = $1;`
+	_, err := db.Exec(query, id)
+	return err
+}
+
+// ============================================================================
+// NATIVE CUSTOMERS (CADASTRO PRÓPRIO DE CLIENTES)
+// ============================================================================
+
+func (db *DB) ListNativeCustomers(search, status, planId string) ([]models.NativeCustomer, error) {
+	query := `
+	SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.address, c.number, c.complement,
+	       c.neighborhood, c.city, c.state, c.postal_code, COALESCE(c.plan_id, ''),
+	       COALESCE(p.name, 'Sem plano'), c.monthly_price, c.due_day, c.status, c.notes, c.created_at, c.updated_at
+	FROM native_customers c
+	LEFT JOIN native_plans p ON c.plan_id = p.id
+	WHERE 1=1
+	`
+	args := make([]interface{}, 0)
+	argIdx := 1
+
+	if search != "" {
+		sClean := "%" + strings.ToLower(strings.TrimSpace(search)) + "%"
+		query += fmt.Sprintf(" AND (LOWER(c.name) LIKE $%d OR c.cpf_cnpj LIKE $%d OR LOWER(c.email) LIKE $%d OR c.phone LIKE $%d)", argIdx, argIdx, argIdx, argIdx)
+		args = append(args, sClean)
+		argIdx++
+	}
+
+	if status != "" {
+		query += fmt.Sprintf(" AND c.status = $%d", argIdx)
+		args = append(args, status)
+		argIdx++
+	}
+
+	if planId != "" {
+		query += fmt.Sprintf(" AND c.plan_id = $%d", argIdx)
+		args = append(args, planId)
+		argIdx++
+	}
+
+	query += " ORDER BY c.name ASC LIMIT 300;"
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]models.NativeCustomer, 0)
+	for rows.Next() {
+		var c models.NativeCustomer
+		var st string
+		if err := rows.Scan(
+			&c.ID, &c.Name, &c.CPFCnpj, &c.Email, &c.Phone, &c.Address, &c.Number, &c.Complement,
+			&c.Neighborhood, &c.City, &c.State, &c.PostalCode, &c.PlanID,
+			&c.PlanName, &c.MonthlyPrice, &c.DueDay, &st, &c.Notes, &c.CreatedAt, &c.UpdatedAt,
+		); err != nil {
+			continue
+		}
+		c.Status = models.NativeCustomerStatus(st)
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (db *DB) GetNativeCustomer(id string) (*models.NativeCustomer, error) {
+	query := `
+	SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.address, c.number, c.complement,
+	       c.neighborhood, c.city, c.state, c.postal_code, COALESCE(c.plan_id, ''),
+	       COALESCE(p.name, 'Sem plano'), c.monthly_price, c.due_day, c.status, c.notes, c.created_at, c.updated_at
+	FROM native_customers c
+	LEFT JOIN native_plans p ON c.plan_id = p.id
+	WHERE c.id = $1;
+	`
+	var c models.NativeCustomer
+	var st string
+	err := db.QueryRow(query, id).Scan(
+		&c.ID, &c.Name, &c.CPFCnpj, &c.Email, &c.Phone, &c.Address, &c.Number, &c.Complement,
+		&c.Neighborhood, &c.City, &c.State, &c.PostalCode, &c.PlanID,
+		&c.PlanName, &c.MonthlyPrice, &c.DueDay, &st, &c.Notes, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	c.Status = models.NativeCustomerStatus(st)
+	return &c, nil
+}
+
+func (db *DB) GetNativeCustomerByCPF(cpf string) (*models.NativeCustomer, error) {
+	clean := regexp.MustCompile(`[^0-9]`).ReplaceAllString(cpf, "")
+	query := `
+	SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.address, c.number, c.complement,
+	       c.neighborhood, c.city, c.state, c.postal_code, COALESCE(c.plan_id, ''),
+	       COALESCE(p.name, 'Sem plano'), c.monthly_price, c.due_day, c.status, c.notes, c.created_at, c.updated_at
+	FROM native_customers c
+	LEFT JOIN native_plans p ON c.plan_id = p.id
+	WHERE regexp_replace(c.cpf_cnpj, '[^0-9]', '', 'g') = $1
+	LIMIT 1;
+	`
+	var c models.NativeCustomer
+	var st string
+	err := db.QueryRow(query, clean).Scan(
+		&c.ID, &c.Name, &c.CPFCnpj, &c.Email, &c.Phone, &c.Address, &c.Number, &c.Complement,
+		&c.Neighborhood, &c.City, &c.State, &c.PostalCode, &c.PlanID,
+		&c.PlanName, &c.MonthlyPrice, &c.DueDay, &st, &c.Notes, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	c.Status = models.NativeCustomerStatus(st)
+	return &c, nil
+}
+
+func (db *DB) CreateNativeCustomer(c *models.NativeCustomer) error {
+	query := `
+	INSERT INTO native_customers (
+		id, name, cpf_cnpj, email, phone, address, number, complement,
+		neighborhood, city, state, postal_code, plan_id, monthly_price, due_day, status, notes, created_at, updated_at
+	) VALUES (
+		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW()
+	);
+	`
+	var planArg interface{} = c.PlanID
+	if c.PlanID == "" {
+		planArg = nil
+	}
+	_, err := db.Exec(
+		query,
+		c.ID, c.Name, c.CPFCnpj, c.Email, c.Phone, c.Address, c.Number, c.Complement,
+		c.Neighborhood, c.City, c.State, c.PostalCode, planArg, c.MonthlyPrice, c.DueDay, string(c.Status), c.Notes,
+	)
+	return err
+}
+
+func (db *DB) UpdateNativeCustomer(c *models.NativeCustomer) error {
+	query := `
+	UPDATE native_customers
+	SET name = $2, cpf_cnpj = $3, email = $4, phone = $5, address = $6, number = $7, complement = $8,
+	    neighborhood = $9, city = $10, state = $11, postal_code = $12, plan_id = $13, monthly_price = $14,
+	    due_day = $15, status = $16, notes = $17, updated_at = NOW()
+	WHERE id = $1;
+	`
+	var planArg interface{} = c.PlanID
+	if c.PlanID == "" {
+		planArg = nil
+	}
+	_, err := db.Exec(
+		query,
+		c.ID, c.Name, c.CPFCnpj, c.Email, c.Phone, c.Address, c.Number, c.Complement,
+		c.Neighborhood, c.City, c.State, c.PostalCode, planArg, c.MonthlyPrice,
+		c.DueDay, string(c.Status), c.Notes,
+	)
+	return err
+}
+
+func (db *DB) DeleteNativeCustomer(id string) error {
+	query := `DELETE FROM native_customers WHERE id = $1;`
+	_, err := db.Exec(query, id)
+	return err
+}
+
+// ============================================================================
+// NATIVE INVOICES (FATURAS E MERCADO PAGO)
+// ============================================================================
+
+func (db *DB) ListNativeInvoices(customerID, cpf, status string) ([]models.NativeInvoice, error) {
+	query := `
+	SELECT i.id, i.customer_id, COALESCE(c.name, 'Cliente'), i.cpf_cnpj, i.amount, TO_CHAR(i.due_date, 'YYYY-MM-DD'),
+	       i.status, i.description, i.payment_method, i.mp_payment_id, i.pix_qr_code, i.pix_qr_code_base64,
+	       i.boleto_url, i.boleto_barcode, i.paid_at, i.created_at, i.updated_at
+	FROM native_invoices i
+	LEFT JOIN native_customers c ON i.customer_id = c.id
+	WHERE 1=1
+	`
+	args := make([]interface{}, 0)
+	argIdx := 1
+
+	if customerID != "" {
+		query += fmt.Sprintf(" AND i.customer_id = $%d", argIdx)
+		args = append(args, customerID)
+		argIdx++
+	}
+
+	if cpf != "" {
+		clean := regexp.MustCompile(`[^0-9]`).ReplaceAllString(cpf, "")
+		query += fmt.Sprintf(" AND regexp_replace(i.cpf_cnpj, '[^0-9]', '', 'g') = $%d", argIdx)
+		args = append(args, clean)
+		argIdx++
+	}
+
+	if status != "" {
+		query += fmt.Sprintf(" AND i.status = $%d", argIdx)
+		args = append(args, status)
+		argIdx++
+	}
+
+	query += " ORDER BY i.due_date DESC LIMIT 200;"
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]models.NativeInvoice, 0)
+	for rows.Next() {
+		var inv models.NativeInvoice
+		var st string
+		var paidAt sql.NullTime
+		if err := rows.Scan(
+			&inv.ID, &inv.CustomerID, &inv.CustomerName, &inv.CPFCnpj, &inv.Amount, &inv.DueDate,
+			&st, &inv.Description, &inv.PaymentMethod, &inv.MPPaymentID, &inv.PixQRCode, &inv.PixQRCodeBase64,
+			&inv.BoletoURL, &inv.BoletoBarcode, &paidAt, &inv.CreatedAt, &inv.UpdatedAt,
+		); err != nil {
+			continue
+		}
+		inv.Status = models.InvoiceStatus(st)
+		if paidAt.Valid {
+			inv.PaidAt = &paidAt.Time
+		}
+		list = append(list, inv)
+	}
+	return list, nil
+}
+
+func (db *DB) GetNativeInvoice(id string) (*models.NativeInvoice, error) {
+	query := `
+	SELECT i.id, i.customer_id, COALESCE(c.name, 'Cliente'), i.cpf_cnpj, i.amount, TO_CHAR(i.due_date, 'YYYY-MM-DD'),
+	       i.status, i.description, i.payment_method, i.mp_payment_id, i.pix_qr_code, i.pix_qr_code_base64,
+	       i.boleto_url, i.boleto_barcode, i.paid_at, i.created_at, i.updated_at
+	FROM native_invoices i
+	LEFT JOIN native_customers c ON i.customer_id = c.id
+	WHERE i.id = $1;
+	`
+	var inv models.NativeInvoice
+	var st string
+	var paidAt sql.NullTime
+	err := db.QueryRow(query, id).Scan(
+		&inv.ID, &inv.CustomerID, &inv.CustomerName, &inv.CPFCnpj, &inv.Amount, &inv.DueDate,
+		&st, &inv.Description, &inv.PaymentMethod, &inv.MPPaymentID, &inv.PixQRCode, &inv.PixQRCodeBase64,
+		&inv.BoletoURL, &inv.BoletoBarcode, &paidAt, &inv.CreatedAt, &inv.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	inv.Status = models.InvoiceStatus(st)
+	if paidAt.Valid {
+		inv.PaidAt = &paidAt.Time
+	}
+	return &inv, nil
+}
+
+func (db *DB) GetNativeInvoiceByMPPaymentID(mpID string) (*models.NativeInvoice, error) {
+	query := `
+	SELECT i.id, i.customer_id, COALESCE(c.name, 'Cliente'), i.cpf_cnpj, i.amount, TO_CHAR(i.due_date, 'YYYY-MM-DD'),
+	       i.status, i.description, i.payment_method, i.mp_payment_id, i.pix_qr_code, i.pix_qr_code_base64,
+	       i.boleto_url, i.boleto_barcode, i.paid_at, i.created_at, i.updated_at
+	FROM native_invoices i
+	LEFT JOIN native_customers c ON i.customer_id = c.id
+	WHERE i.mp_payment_id = $1;
+	`
+	var inv models.NativeInvoice
+	var st string
+	var paidAt sql.NullTime
+	err := db.QueryRow(query, mpID).Scan(
+		&inv.ID, &inv.CustomerID, &inv.CustomerName, &inv.CPFCnpj, &inv.Amount, &inv.DueDate,
+		&st, &inv.Description, &inv.PaymentMethod, &inv.MPPaymentID, &inv.PixQRCode, &inv.PixQRCodeBase64,
+		&inv.BoletoURL, &inv.BoletoBarcode, &paidAt, &inv.CreatedAt, &inv.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	inv.Status = models.InvoiceStatus(st)
+	if paidAt.Valid {
+		inv.PaidAt = &paidAt.Time
+	}
+	return &inv, nil
+}
+
+func (db *DB) CreateNativeInvoice(inv *models.NativeInvoice) error {
+	query := `
+	INSERT INTO native_invoices (
+		id, customer_id, cpf_cnpj, amount, due_date, status, description,
+		payment_method, mp_payment_id, pix_qr_code, pix_qr_code_base64, boleto_url, boleto_barcode, created_at, updated_at
+	) VALUES (
+		$1, $2, $3, $4, $5::DATE, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+	);
+	`
+	_, err := db.Exec(
+		query,
+		inv.ID, inv.CustomerID, inv.CPFCnpj, inv.Amount, inv.DueDate, string(inv.Status), inv.Description,
+		inv.PaymentMethod, inv.MPPaymentID, inv.PixQRCode, inv.PixQRCodeBase64, inv.BoletoURL, inv.BoletoBarcode,
+	)
+	return err
+}
+
+func (db *DB) UpdateNativeInvoice(inv *models.NativeInvoice) error {
+	query := `
+	UPDATE native_invoices
+	SET amount = $2, due_date = $3::DATE, status = $4, description = $5, payment_method = $6,
+	    mp_payment_id = $7, pix_qr_code = $8, pix_qr_code_base64 = $9, boleto_url = $10,
+	    boleto_barcode = $11, paid_at = $12, updated_at = NOW()
+	WHERE id = $1;
+	`
+	var paidAtArg interface{} = nil
+	if inv.PaidAt != nil {
+		paidAtArg = *inv.PaidAt
+	}
+	_, err := db.Exec(
+		query,
+		inv.ID, inv.Amount, inv.DueDate, string(inv.Status), inv.Description, inv.PaymentMethod,
+		inv.MPPaymentID, inv.PixQRCode, inv.PixQRCodeBase64, inv.BoletoURL, inv.BoletoBarcode, paidAtArg,
+	)
+	return err
+}
+
+func (db *DB) MarkInvoiceAsPaid(id, mpPaymentID string, paidAt time.Time) error {
+	query := `
+	UPDATE native_invoices
+	SET status = 'paid', mp_payment_id = CASE WHEN $2 <> '' THEN $2 ELSE mp_payment_id END, paid_at = $3, updated_at = NOW()
+	WHERE id = $1;
+	`
+	_, err := db.Exec(query, id, mpPaymentID, paidAt)
+	return err
+}
+
+func (db *DB) seedDefaultLicense() error {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM system_license").Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		now := time.Now().UTC()
+		expires := now.Add(30 * 24 * time.Hour)
+		grace := expires.Add(72 * time.Hour)
+
+		query := `
+		INSERT INTO system_license (
+			id, license_key, tenant_cnpj, tenant_name, license_type, status, trial_days_remaining,
+			expires_at, grace_period_until, max_operators, allowed_modules, updated_at
+		) VALUES (
+			1, 'TRIAL-30DAYS-INITIAL', '', 'Empresa em Avaliação', 'trial', 'trial', 30,
+			$1, $2, 10, 'erp,native,omnichannel', NOW()
+		);
+		`
+		_, err := db.Exec(query, expires, grace)
+		return err
+	}
+	return nil
+}
+
+func (db *DB) GetSystemLicense() (*models.SystemLicense, error) {
+	query := `
+	SELECT license_key, tenant_cnpj, tenant_name, license_type, status,
+	       trial_days_remaining, expires_at, grace_period_until, last_heartbeat_at,
+	       max_operators, allowed_modules, COALESCE(allowed_operation_mode, 'hybrid'), suspension_reason, payment_pix,
+	       payment_qr_code_base64, payment_amount, discount_description, discount_amount,
+	       contact_support_phone, contact_support_email, signature, updated_at
+	FROM system_license
+	WHERE id = 1;
+	`
+	var lic models.SystemLicense
+	var licType, st string
+	var lastHeartbeat sql.NullTime
+
+	err := db.QueryRow(query).Scan(
+		&lic.LicenseKey, &lic.TenantCNPJ, &lic.TenantName, &licType, &st,
+		&lic.TrialDaysRemaining, &lic.ExpiresAt, &lic.GracePeriodUntil, &lastHeartbeat,
+		&lic.MaxOperators, &lic.AllowedModules, &lic.AllowedOperationMode, &lic.SuspensionReason, &lic.PaymentPix,
+		&lic.PaymentQRCodeBase64, &lic.PaymentAmount, &lic.DiscountDescription, &lic.DiscountAmount,
+		&lic.ContactSupportPhone, &lic.ContactSupportEmail, &lic.Signature, &lic.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			_ = db.seedDefaultLicense()
+			return db.GetSystemLicense()
+		}
+		return nil, err
+	}
+
+	lic.LicenseType = models.LicenseType(licType)
+	lic.Status = models.LicenseStatus(st)
+	if lastHeartbeat.Valid {
+		lic.LastHeartbeatAt = lastHeartbeat.Time
+	}
+	if lic.AllowedOperationMode == "" {
+		lic.AllowedOperationMode = "hybrid"
+	}
+
+	// Atualiza dinamicamente a contagem de dias restantes se for trial
+	if lic.LicenseType == models.LicenseTypeTrial && lic.Status == models.LicenseStatusTrial {
+		diff := time.Until(lic.ExpiresAt)
+		days := int(diff.Hours() / 24)
+		if days < 0 {
+			days = 0
+		}
+		lic.TrialDaysRemaining = days
+		if diff <= 0 {
+			lic.Status = models.LicenseStatusSuspended
+			lic.SuspensionReason = "Período de avaliação gratuita de 30 dias expirado. Ative sua licença ou contrate seu plano."
+		}
+	}
+
+	return &lic, nil
+}
+
+func (db *DB) SaveSystemLicense(lic *models.SystemLicense) error {
+	query := `
+	INSERT INTO system_license (
+		id, license_key, tenant_cnpj, tenant_name, license_type, status,
+		trial_days_remaining, expires_at, grace_period_until, last_heartbeat_at,
+		max_operators, allowed_modules, allowed_operation_mode, suspension_reason, payment_pix,
+		payment_qr_code_base64, payment_amount, discount_description, discount_amount,
+		contact_support_phone, contact_support_email, signature, updated_at
+	) VALUES (
+		1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW()
+	)
+	ON CONFLICT (id) DO UPDATE SET
+		license_key = EXCLUDED.license_key,
+		tenant_cnpj = EXCLUDED.tenant_cnpj,
+		tenant_name = EXCLUDED.tenant_name,
+		license_type = EXCLUDED.license_type,
+		status = EXCLUDED.status,
+		trial_days_remaining = EXCLUDED.trial_days_remaining,
+		expires_at = EXCLUDED.expires_at,
+		grace_period_until = EXCLUDED.grace_period_until,
+		last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+		max_operators = EXCLUDED.max_operators,
+		allowed_modules = EXCLUDED.allowed_modules,
+		allowed_operation_mode = EXCLUDED.allowed_operation_mode,
+		suspension_reason = EXCLUDED.suspension_reason,
+		payment_pix = EXCLUDED.payment_pix,
+		payment_qr_code_base64 = EXCLUDED.payment_qr_code_base64,
+		payment_amount = EXCLUDED.payment_amount,
+		discount_description = EXCLUDED.discount_description,
+		discount_amount = EXCLUDED.discount_amount,
+		contact_support_phone = EXCLUDED.contact_support_phone,
+		contact_support_email = EXCLUDED.contact_support_email,
+		signature = EXCLUDED.signature,
+		updated_at = NOW();
+	`
+	var lastHbArg interface{} = nil
+	if !lic.LastHeartbeatAt.IsZero() {
+		lastHbArg = lic.LastHeartbeatAt
+	}
+
+	allowedOp := lic.AllowedOperationMode
+	if allowedOp == "" {
+		allowedOp = "hybrid"
+	}
+
+	_, err := db.Exec(
+		query,
+		lic.LicenseKey, lic.TenantCNPJ, lic.TenantName, string(lic.LicenseType), string(lic.Status),
+		lic.TrialDaysRemaining, lic.ExpiresAt, lic.GracePeriodUntil, lastHbArg,
+		lic.MaxOperators, lic.AllowedModules, allowedOp, lic.SuspensionReason, lic.PaymentPix,
+		lic.PaymentQRCodeBase64, lic.PaymentAmount, lic.DiscountDescription, lic.DiscountAmount,
+		lic.ContactSupportPhone, lic.ContactSupportEmail, lic.Signature,
+	)
+	return err
+}
+
+
 
 
 

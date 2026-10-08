@@ -17,6 +17,7 @@ import (
 	"chat-interno-server/internal/database"
 	"chat-interno-server/internal/handlers"
 	"chat-interno-server/internal/middleware"
+	"chat-interno-server/internal/models"
 	"chat-interno-server/internal/services"
 	"chat-interno-server/internal/websocket"
 )
@@ -46,6 +47,9 @@ func main() {
 	networkService := services.NewNetworkService(db)
 	pushService := services.NewPushService()
 	channelService := services.NewChannelService(db, chatService, rbxService)
+	mpService := services.NewMercadoPagoService()
+	nativeBillingService := services.NewNativeBillingService(db, mpService)
+	licenseService := services.NewLicenseService(db)
 
 	// 3. Inicializa e roda o Hub WebSocket
 	hub := websocket.NewHub(chatService)
@@ -53,13 +57,30 @@ func main() {
 
 	channelService.SetHub(hub)
 
+	// Notifica em tempo real todos os operadores/telas via WebSocket quando a licença for alterada no Master
+	licenseService.OnLicenseChange = func(lic *models.SystemLicense) {
+		hub.BroadcastAll(&models.WSAction{
+			Type:    "license_updated",
+			Payload: lic,
+		})
+	}
+
 	// Worker em background para monitorar inatividade no chatbot (timeout configurável com fallback de setor)
 	ctxBot, cancelBot := context.WithCancel(context.Background())
 	defer cancelBot()
 	go channelService.StartBotTimeoutWorker(ctxBot)
 
+	// Worker em background para sincronização e validação de licença com o Super Servidor Mestre
+	ctxLicense, cancelLicense := context.WithCancel(context.Background())
+	defer cancelLicense()
+	go licenseService.StartLicenseSyncWorker(ctxLicense)
+
 	// 4. Inicializa handlers e limitadores
-	h := handlers.NewHandler(chatService, extService, authService, rbxService, fileService, campaignService, networkService, pushService, channelService, db, hub, cfg.AllowedOrigins)
+	h := handlers.NewHandler(
+		chatService, extService, authService, rbxService, fileService,
+		campaignService, networkService, pushService, channelService,
+		nativeBillingService, mpService, licenseService, db, hub, cfg.AllowedOrigins,
+	)
 	rateLimiter := middleware.NewIPRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst)
 
 	// 5. Configura roteador Chi com middlewares de segurança
@@ -73,6 +94,7 @@ func main() {
 	r.Use(middleware.SecureHeaders)                 // Proteção contra XSS / sniffing
 	r.Use(middleware.SetupCORS(cfg.AllowedOrigins)) // Regra 9: CORS restritivo
 	r.Use(middleware.RateLimitMiddleware(rateLimiter)) // Regra 5: Rate Limiting por IP
+	r.Use(h.LicenseMiddleware)                     // Proteção e suspensão por licença / inadimplência
 
 	// Rota do WebSocket (Handshake)
 	r.Get("/ws", h.HandleWebSocket)
@@ -217,6 +239,48 @@ func main() {
 	r.Post("/api/webhooks/whatsapp-official", h.HandleWhatsAppOfficialWebhook)
 	r.Post("/api/webhooks/evolution", h.HandleEvolutionWebhook)
 	r.Post("/api/webhooks/evolution/*", h.HandleEvolutionWebhook)
+	r.Post("/api/webhooks/mercadopago", h.HandleMercadoPagoWebhook) // Webhook oficial do Mercado Pago
+
+	// Configurações do Sistema & Modos de Trabalho (ERP vs Nativo vs Híbrido) & Licenciamento
+	r.Route("/api/system", func(r chi.Router) {
+		r.Get("/settings", h.HandleGetSystemSettings)
+		r.Put("/settings", h.HandleSaveSystemSettings)
+		r.Post("/mercadopago/test", h.HandleTestMercadoPago)
+
+		// Licenciamento (Status, Planos, Checkout, Confirmação e Sincronização com Master)
+		r.Get("/license", h.HandleGetLicenseStatus)
+		r.Get("/license/plans", h.HandleGetLicensePlans)
+		r.Post("/license/checkout", h.HandleCreateLicenseCheckout)
+		r.Post("/license/check-payment", h.HandleCheckPaymentStatus)
+		r.Post("/license/activate", h.HandleActivateLicense)
+		r.Post("/license/refresh", h.HandleRefreshLicense)
+	})
+
+	// Modo Nativo: Gestão de Planos, Clientes e Faturas com Mercado Pago
+	r.Route("/api/native", func(r chi.Router) {
+		// Planos e Serviços
+		r.Get("/plans", h.HandleListNativePlans)
+		r.Post("/plans", h.HandleCreateNativePlan)
+		r.Put("/plans/{id}", h.HandleUpdateNativePlan)
+		r.Delete("/plans/{id}", h.HandleDeleteNativePlan)
+
+		// Clientes Nativos
+		r.Get("/customers", h.HandleListNativeCustomers)
+		r.Get("/customers/lookup", h.HandleLookupNativeCustomer)
+		r.Get("/customers/{id}", h.HandleGetNativeCustomer)
+		r.Post("/customers", h.HandleCreateNativeCustomer)
+		r.Put("/customers/{id}", h.HandleUpdateNativeCustomer)
+		r.Delete("/customers/{id}", h.HandleDeleteNativeCustomer)
+
+		// Faturas e Cobranças
+		r.Get("/invoices", h.HandleListNativeInvoices)
+		r.Get("/invoices/{id}", h.HandleGetNativeInvoice)
+		r.Post("/invoices", h.HandleCreateNativeInvoice)
+		r.Post("/invoices/{id}/pix", h.HandleGenerateInvoicePix)
+		r.Post("/invoices/{id}/boleto", h.HandleGenerateInvoiceBoleto)
+		r.Post("/invoices/{id}/pay-manual", h.HandlePayInvoiceManual)
+		r.Post("/invoices/{id}/send-to-chat", h.HandleSendNativeInvoiceToChat)
+	})
 
 	// Consultas a APIs externas
 	r.Get("/api/customers/lookup", h.HandleCustomerLookup)

@@ -27,11 +27,14 @@ type Handler struct {
 	fileService     *services.FileService
 	campaignService *services.CampaignService
 	networkService  *services.NetworkService
-	pushService     *services.PushService
-	channelService  *services.ChannelService
-	db              *database.DB
-	hub             *ws.Hub
-	upgrader        websocket.Upgrader
+	pushService          *services.PushService
+	channelService       *services.ChannelService
+	nativeBillingService *services.NativeBillingService
+	mercadoPagoService   *services.MercadoPagoService
+	licenseService       *services.LicenseService
+	db                   *database.DB
+	hub                  *ws.Hub
+	upgrader             websocket.Upgrader
 }
 
 func NewHandler(
@@ -44,6 +47,9 @@ func NewHandler(
 	networkService *services.NetworkService,
 	pushService *services.PushService,
 	channelService *services.ChannelService,
+	nativeBillingService *services.NativeBillingService,
+	mercadoPagoService *services.MercadoPagoService,
+	licenseService *services.LicenseService,
 	db *database.DB,
 	hub *ws.Hub,
 	allowedOrigins []string,
@@ -67,18 +73,21 @@ func NewHandler(
 	}
 
 	return &Handler{
-		chatService:     chatService,
-		extService:      extService,
-		authService:     authService,
-		rbxService:      rbxService,
-		fileService:     fileService,
-		campaignService: campaignService,
-		networkService:  networkService,
-		pushService:     pushService,
-		channelService:  channelService,
-		db:              db,
-		hub:             hub,
-		upgrader:        upgrader,
+		chatService:          chatService,
+		extService:           extService,
+		authService:          authService,
+		rbxService:           rbxService,
+		fileService:          fileService,
+		campaignService:      campaignService,
+		networkService:       networkService,
+		pushService:          pushService,
+		channelService:       channelService,
+		nativeBillingService: nativeBillingService,
+		mercadoPagoService:   mercadoPagoService,
+		licenseService:       licenseService,
+		db:                   db,
+		hub:                  hub,
+		upgrader:             upgrader,
 	}
 }
 
@@ -769,9 +778,17 @@ func (h *Handler) HandleCustomerLookup(w http.ResponseWriter, r *http.Request) {
 
 // HandleHealth health check
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
-	h.respondJSON(w, http.StatusOK, map[string]string{
-		"status": "healthy",
-		"system": "Chat-Interno Go Backend",
+	companyName := "Central de Atendimento"
+	if h.db != nil {
+		if settings, err := h.db.GetSystemSettings(); err == nil && settings != nil && settings.CompanyName != "" {
+			companyName = settings.CompanyName
+		}
+	}
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":      "healthy",
+		"system":      "Chat-Interno Go Backend",
+		"companyName": companyName,
+		"version":     "1.0.0",
 	})
 }
 
@@ -910,4 +927,8 @@ func (h *Handler) respondJSON(w http.ResponseWriter, statusCode int, data interf
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func (h *Handler) respondError(w http.ResponseWriter, statusCode int, message string) {
+	h.respondJSON(w, statusCode, map[string]string{"error": message})
 }

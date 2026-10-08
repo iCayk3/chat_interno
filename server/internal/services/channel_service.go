@@ -1265,10 +1265,24 @@ func (s *ChannelService) handleBotFlowStep(conv *models.Conversation, senderName
 		conv.CpfCnpj = cleanDoc
 		conv.UpdatedAt = now
 
-		// Consulta no ERP RBX Soft
+		// Consulta o modo de operação do sistema
+		var operationMode models.OperationMode = models.OperationModeERP
+		if s.db != nil {
+			if sysSettings, err := s.db.GetSystemSettings(); err == nil && sysSettings != nil && sysSettings.OperationMode != "" {
+				operationMode = sysSettings.OperationMode
+			}
+		}
+
+		// Consulta no ERP RBX Soft se aplicável
 		var rbxClient *models.RBXClient
-		if s.rbxService != nil {
+		if (operationMode == models.OperationModeERP || operationMode == models.OperationModeHybrid) && s.rbxService != nil {
 			rbxClient, _ = s.rbxService.LookupClientByCPFCNPJ(context.Background(), cleanDoc)
+		}
+
+		// Consulta no banco de dados Nativo se aplicável
+		var nativeCustomer *models.NativeCustomer
+		if (operationMode == models.OperationModeNative || operationMode == models.OperationModeHybrid) && s.db != nil {
+			nativeCustomer, _ = s.db.GetNativeCustomerByCPF(cleanDoc)
 		}
 
 		// Consulta dados de rede física (OLT, PON, CTO)
@@ -1325,8 +1339,50 @@ func (s *ChannelService) handleBotFlowStep(conv *models.Conversation, senderName
 				s.saveSystemMessage(conv.ID, queueMsg)
 				s.notifyOperatorsConversationUpdated(conv)
 			}
+		} else if nativeCustomer != nil {
+			// Cliente localizado na base Nativa!
+			conv.ClientName = nativeCustomer.Name
+			conv.ContactName = senderName
+			if nativeCustomer.PlanName != "" {
+				conv.RbxGroup = nativeCustomer.PlanName
+			}
+
+			var settings *models.ChatSettings
+			if s.db != nil {
+				settings, _ = s.db.GetChatSettings()
+			}
+
+			if settings != nil && settings.EnableBotFlow {
+				conv.BotStep = "menu"
+				if s.db != nil {
+					_ = s.db.UpsertConversation(conv)
+				}
+				if s.chatService != nil {
+					s.chatService.UpsertMemoryConversation(conv)
+				}
+
+				menuText := fmt.Sprintf("Identificamos seu cadastro, *%s*! ☀️\n\nComo podemos te ajudar hoje? Digite o número da opção desejada:\n\n1️⃣ - 2ª Via de Fatura / Código PIX\n2️⃣ - Suporte Técnico\n3️⃣ - Planos e Serviços\n0️⃣ - Falar com um Atendente", nativeCustomer.Name)
+				s.SendMessageToChannel(conv, menuText)
+				s.saveSystemMessage(conv.ID, menuText)
+				s.notifyOperatorsConversationUpdated(conv)
+			} else {
+				conv.Status = models.ConvWaiting
+				conv.BotStep = ""
+				conv.Department = "Suporte Técnico"
+				if s.db != nil {
+					_ = s.db.UpsertConversation(conv)
+				}
+				if s.chatService != nil {
+					s.chatService.UpsertMemoryConversation(conv)
+				}
+
+				queueMsg := fmt.Sprintf("Olá, *%s*! Seu cadastro foi identificado com sucesso. ☀️\n\nEstamos transferindo você para a nossa fila de atendimento. Em instantes um operador irá lhe atender!", nativeCustomer.Name)
+				s.SendMessageToChannel(conv, queueMsg)
+				s.saveSystemMessage(conv.ID, queueMsg)
+				s.notifyOperatorsConversationUpdated(conv)
+			}
 		} else {
-			// Cliente não localizado no RBX: solicita nome completo
+			// Cliente não localizado no RBX nem na base Nativa: solicita nome completo
 			conv.BotStep = "awaiting_name"
 			if s.db != nil {
 				_ = s.db.UpsertConversation(conv)
@@ -1362,7 +1418,7 @@ func (s *ChannelService) handleBotFlowStep(conv *models.Conversation, senderName
 			s.chatService.UpsertMemoryConversation(conv)
 		}
 
-		menuText := fmt.Sprintf("Prazer, *%s*! ☀️\n\nComo podemos te ajudar? Digite o número da opção desejada:\n\n1️⃣ - Contratar Planos de Fibra Óptica\n2️⃣ - Digitar outro CPF/CNPJ\n0️⃣ - Falar com um Atendente", name)
+		menuText := fmt.Sprintf("Prazer, *%s*! ☀️\n\nComo podemos te ajudar? Digite o número da opção desejada:\n\n1️⃣ - Contratar Planos e Serviços\n2️⃣ - Digitar outro CPF/CNPJ\n0️⃣ - Falar com um Atendente", name)
 		s.SendMessageToChannel(conv, menuText)
 		s.saveSystemMessage(conv.ID, menuText)
 		s.notifyOperatorsConversationUpdated(conv)
@@ -1392,7 +1448,15 @@ func (s *ChannelService) handleBotFlowStep(conv *models.Conversation, senderName
 		}
 
 		if opt == "1" || strings.Contains(lower, "fatura") || strings.Contains(lower, "boleto") || strings.Contains(lower, "pix") || strings.Contains(lower, "segunda via") || strings.Contains(lower, "2 via") {
-			if s.rbxService != nil && conv.CpfCnpj != "" {
+			var operationMode models.OperationMode = models.OperationModeERP
+			if s.db != nil {
+				if sysSettings, err := s.db.GetSystemSettings(); err == nil && sysSettings != nil && sysSettings.OperationMode != "" {
+					operationMode = sysSettings.OperationMode
+				}
+			}
+
+			// 1. Tenta buscar no ERP RBX Soft se permitido
+			if (operationMode == models.OperationModeERP || operationMode == models.OperationModeHybrid) && s.rbxService != nil && conv.CpfCnpj != "" {
 				finSummary, err := s.rbxService.GetClientFinancial(context.Background(), "", conv.CpfCnpj)
 				if err == nil && finSummary != nil && len(finSummary.Documents) > 0 {
 					var buf strings.Builder
@@ -1419,6 +1483,46 @@ func (s *ChannelService) handleBotFlowStep(conv *models.Conversation, senderName
 					s.SendMessageToChannel(conv, replyText)
 					s.saveSystemMessage(conv.ID, replyText)
 					return nil
+				}
+			}
+
+			// 2. Se não localizou no RBX ou se estiver em modo Nativo / Híbrido, consulta no Mercado Pago / banco nativo
+			if (operationMode == models.OperationModeNative || operationMode == models.OperationModeHybrid) && s.db != nil && conv.CpfCnpj != "" {
+				if nativeCust, err := s.db.GetNativeCustomerByCPF(conv.CpfCnpj); err == nil && nativeCust != nil {
+					invoices, err := s.db.ListNativeInvoices(nativeCust.ID, "", "")
+					if err == nil && len(invoices) > 0 {
+						var buf strings.Builder
+						buf.WriteString("📄 *Faturas localizadas no seu cadastro:*\n\n")
+						count := 0
+						for _, inv := range invoices {
+							if inv.Status == models.InvoiceStatusPaid || inv.Status == models.InvoiceStatusCanceled {
+								continue
+							}
+							if count >= 3 {
+								break
+							}
+							statusIcon := "⏳"
+							if inv.Status == models.InvoiceStatusOverdue {
+								statusIcon = "⚠️"
+							}
+							buf.WriteString(fmt.Sprintf("%s *%s*\nVencimento: %s | Valor: R$ %.2f\nStatus: %s\n", statusIcon, inv.Description, inv.DueDate, inv.Amount, strings.ToUpper(string(inv.Status))))
+							if inv.PixQRCode != "" {
+								buf.WriteString(fmt.Sprintf("🔑 *PIX Copia e Cola:*\n```%s```\n", inv.PixQRCode))
+							}
+							if inv.BoletoURL != "" {
+								buf.WriteString(fmt.Sprintf("🔗 *Boleto (PDF):*\n%s\n", inv.BoletoURL))
+							}
+							buf.WriteString("\n")
+							count++
+						}
+						if count > 0 {
+							buf.WriteString("Digite *0* a qualquer momento para falar com um atendente.")
+							replyText := buf.String()
+							s.SendMessageToChannel(conv, replyText)
+							s.saveSystemMessage(conv.ID, replyText)
+							return nil
+						}
+					}
 				}
 			}
 

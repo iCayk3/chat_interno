@@ -29,6 +29,36 @@ import { ConfigRedeView } from './components/crm/ConfigRedeView';
 import { MeuPerfilModal } from './components/crm/MeuPerfilModal';
 import { NovoAtendimentoModal } from './components/chat/NovoAtendimentoModal';
 import { isSameDepartment } from './utils/rbac';
+import { BellRing, AlertCircle } from 'lucide-react';
+import {
+  playClientMessageSound,
+  playQueueAlertSound,
+  requestDesktopNotificationPermission,
+  showDesktopNotification,
+  initServiceWorker,
+  getNotificationPermissionStatus,
+  flashDocumentTitle,
+} from './utils/notifications';
+
+interface ToastPopup {
+  id: string;
+  conversationId: string;
+  clientName: string;
+  content: string;
+  channel?: string;
+}
+
+const isSameDay = (dateStr?: string) => {
+  if (!dateStr) return false;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return false;
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+};
 
 export const App: React.FC = () => {
   // Auth & Session State
@@ -52,10 +82,48 @@ export const App: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isClientTyping, setIsClientTyping] = useState(false);
+  const [toastPopup, setToastPopup] = useState<ToastPopup | null>(null);
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission>(() =>
+    getNotificationPermissionStatus()
+  );
 
-  // Ref sempre sincronizada com o estado para evitar stale closures em listeners de WebSocket
+  const handleToggleWindowsNotifications = async () => {
+    if (notifPermission === 'granted') {
+      playClientMessageSound();
+      await showDesktopNotification(
+        'SOL Atendimento - Teste no Windows',
+        '🔔 Notificação do Sistema Operacional funcionando! Seus alertas chegarão aqui na área de trabalho.',
+        {},
+        () => {
+          window.focus();
+        }
+      );
+      flashDocumentTitle('Teste de Notificação');
+      return;
+    }
+
+    const perm = await requestDesktopNotificationPermission();
+    setNotifPermission(perm);
+    if (perm === 'granted') {
+      playClientMessageSound();
+      await showDesktopNotification(
+        'SOL Atendimento Integrado',
+        '✅ Notificações do Windows ATIVADAS! Agora você receberá alertas direto no seu computador.',
+        {},
+        () => {
+          window.focus();
+        }
+      );
+      flashDocumentTitle('Notificações Ativadas!');
+    }
+  };
+
+  // Refs sempre sincronizadas com o estado para evitar stale closures em listeners de WebSocket
   const selectedIdRef = useRef<string | null>(selectedId);
   selectedIdRef.current = selectedId;
+  const conversationsRef = useRef<Conversation[]>(conversations);
+  conversationsRef.current = conversations;
+  const notifiedMsgIdsRef = useRef<Map<string, number>>(new Map());
 
   const handleLoginSuccess = (user: AuthUser) => {
     setCurrentUser(user);
@@ -114,6 +182,20 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!currentUser) return;
 
+    // Inicializa o Service Worker para garantir suporte a notificações mesmo em segundo plano
+    initServiceWorker().catch(() => {});
+
+    // Listener para foco e navegação quando o operador clica no alerta do Windows
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'NOTIFICATION_CLICK' && event.data?.data?.conversationId) {
+        setSelectedId(event.data.data.conversationId);
+        setActiveTab('active');
+      }
+    };
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    }
+
     operatorSocket.setOperator(currentUser.id, currentUser.name);
     loadConversations();
 
@@ -134,6 +216,58 @@ export const App: React.FC = () => {
         });
       }
 
+      // Notificações sonoras e visuais para mensagens de clientes (com estrita deduplicação por ID da mensagem)
+      if (newMsg.senderType === 'client') {
+        const msgKey = newMsg.id || `${newMsg.conversationId}-${newMsg.timestamp}`;
+        const now = Date.now();
+        // Limpa notificações antigas (> 30s)
+        for (const [k, ts] of notifiedMsgIdsRef.current.entries()) {
+          if (now - ts > 30000) notifiedMsgIdsRef.current.delete(k);
+        }
+
+        const alreadyNotified = notifiedMsgIdsRef.current.has(msgKey);
+        if (!alreadyNotified) {
+          notifiedMsgIdsRef.current.set(msgKey, now);
+
+          const conv = conversationsRef.current.find((c) => c.id === newMsg.conversationId);
+          const isActiveWithMe =
+            conv &&
+            conv.status === 'active' &&
+            (conv.operator?.id === currentUser?.id || conv.operator?.name === currentUser?.name);
+
+          if (isActiveWithMe) {
+            // 1. Sinal sonoro de mensagem do cliente (Sintetizador Web Audio)
+            playClientMessageSound();
+
+            // 2. Popup do sistema no canto inferior direito da tela
+            setToastPopup({
+              id: newMsg.id,
+              conversationId: conv.id,
+              clientName: conv.clientName,
+              content: newMsg.content,
+              channel: conv.channel,
+            });
+
+            // 3. Notificação nativa no Sistema Operacional (Windows / OS Notification)
+            showDesktopNotification(
+              `Mensagem de ${conv.clientName}`,
+              newMsg.content,
+              { conversationId: conv.id, messageId: newMsg.id },
+              () => {
+                setSelectedId(conv.id);
+                setActiveTab('active');
+              }
+            );
+
+            // 4. Pisca o título da aba na barra de tarefas do Windows
+            flashDocumentTitle(`Nova mensagem de ${conv.clientName}`);
+          } else if (conv && conv.status === 'waiting') {
+            // Apenas sinal sonoro diferente de alerta de fila se o cliente já estiver aguardando na fila (após CPF e seleção de setor)
+            playQueueAlertSound();
+          }
+        }
+      }
+
       // Atualiza a lista lateral para refletir contadores e novas mensagens
       loadConversations();
     });
@@ -145,8 +279,11 @@ export const App: React.FC = () => {
     });
 
     const unsubAction = operatorSocket.onAction((action) => {
-      if (
-        action.type === 'new_chat_waiting' ||
+      if (action.type === 'new_chat_waiting') {
+        // Novo atendimento na fila: alerta sonoro característico da fila
+        playQueueAlertSound();
+        loadConversations();
+      } else if (
         action.type === 'conversation_updated' ||
         action.type === 'operator_assigned' ||
         action.type === 'chat_closed'
@@ -164,6 +301,9 @@ export const App: React.FC = () => {
     const interval = setInterval(loadConversations, 6000);
 
     return () => {
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      }
       unsubStatus();
       unsubMessage();
       unsubTyping();
@@ -172,6 +312,15 @@ export const App: React.FC = () => {
       operatorSocket.disconnect();
     };
   }, [currentUser]);
+
+  // Auto-dismiss do popup de notificação em 6 segundos
+  useEffect(() => {
+    if (!toastPopup) return;
+    const timer = setTimeout(() => {
+      setToastPopup(null);
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [toastPopup]);
 
   // Quando o operador troca de conversa selecionada
   useEffect(() => {
@@ -194,11 +343,24 @@ export const App: React.FC = () => {
   const visibleConversations = conversations.filter((c) => {
     if (userRole === 'operador') {
       // Na fila de espera, o operador visualiza atendimentos do seu departamento para assumir
-      if (c.status === 'waiting') {
+      if (c.status === 'waiting' || c.status === 'bot') {
         return !currentUser?.department || isSameDepartment(c.department, currentUser.department);
       }
-      // Em atendimentos ativos ou finalizados, visualiza somente aquilo a que pertence ao seu usuário
-      return c.operator?.id === currentUser?.id;
+      // Em atendimentos ativos, visualiza somente aquilo a que pertence ao seu usuário
+      if (c.status === 'active') {
+        return c.operator?.id === currentUser?.id || c.operator?.name === currentUser?.name;
+      }
+      // Em finalizados, visualiza apenas os de hoje finalizados pelo próprio operador
+      if (c.status === 'closed' || c.status === 'waiting_rating') {
+        const isToday = isSameDay(c.closedAt || c.updatedAt);
+        const isMine =
+          c.closedBy === currentUser?.id ||
+          c.closedBy === currentUser?.name ||
+          c.operator?.id === currentUser?.id ||
+          c.operator?.name === currentUser?.name;
+        return isToday && isMine;
+      }
+      return false;
     }
 
     if (userRole === 'gestor') {
@@ -213,7 +375,7 @@ export const App: React.FC = () => {
   });
 
   const selectedConversation = visibleConversations.find((c) => c.id === selectedId) || null;
-  const waitingCount = visibleConversations.filter((c) => c.status === 'waiting').length;
+  const waitingCount = visibleConversations.filter((c) => c.status === 'waiting' || c.status === 'bot').length;
 
   // Sincroniza seleção quando o perfil de acesso é alternado
   useEffect(() => {
@@ -257,7 +419,7 @@ export const App: React.FC = () => {
     if (!window.confirm('Deseja realmente encerrar este atendimento? Ele será arquivado no histórico.')) return;
 
     try {
-      await api.closeConversation(selectedId);
+      await api.closeConversation(selectedId, undefined, currentUser?.name || currentUser?.id);
       await loadConversations();
       setActiveTab('closed');
     } catch (e) {
@@ -436,14 +598,34 @@ export const App: React.FC = () => {
               onSelect={(id) => {
                 setSelectedId(id);
                 const found = visibleConversations.find((c) => c.id === id);
-                if (found && found.status !== activeTab) {
-                  setActiveTab(found.status);
+                if (found) {
+                  if (found.status === 'bot' || found.status === 'waiting') {
+                    setActiveTab('waiting');
+                  } else if (found.status === 'waiting_rating' || found.status === 'closed') {
+                    setActiveTab('closed');
+                  } else {
+                    setActiveTab(found.status);
+                  }
                 }
               }}
               activeTab={activeTab}
               onTabChange={(tab) => {
                 setActiveTab(tab);
-                const firstInTab = visibleConversations.find((c) => c.status === tab);
+                const firstInTab = visibleConversations.find((c) => {
+                  if (tab === 'closed') {
+                    const isClosedStatus = c.status === 'closed' || c.status === 'waiting_rating';
+                    const isToday = isSameDay(c.closedAt || c.updatedAt);
+                    const isMine =
+                      !currentUser ||
+                      c.closedBy === currentUser.id ||
+                      c.closedBy === currentUser.name ||
+                      c.operator?.id === currentUser.id ||
+                      c.operator?.name === currentUser.name;
+                    return isClosedStatus && isToday && isMine;
+                  }
+                  if (tab === 'waiting') return c.status === 'waiting' || c.status === 'bot';
+                  return c.status === tab;
+                });
                 if (firstInTab) {
                   setSelectedId(firstInTab.id);
                 } else {
@@ -457,6 +639,8 @@ export const App: React.FC = () => {
               onOpenNewChat={() => setIsNovoAtendimentoOpen(true)}
               userRole={userRole}
               currentUser={currentUser}
+              notificationPermission={notifPermission}
+              onToggleNotification={handleToggleWindowsNotifications}
             />
 
             {/* 2. Área Central de Conversa em Tempo Real */}
@@ -505,6 +689,45 @@ export const App: React.FC = () => {
 
       {/* Conteúdo Dinâmico Selecionado */}
       <div className="flex-1 h-full overflow-hidden flex flex-col">
+        {/* Banner para Ativação de Notificações Nativas do Windows */}
+        {notifPermission === 'default' && (
+          <div className="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 text-white px-5 py-2.5 flex items-center justify-between text-xs font-medium shadow-md shrink-0">
+            <div className="flex items-center gap-3">
+              <span className="p-1.5 bg-white/20 rounded-lg shrink-0">
+                <BellRing className="w-4 h-4 text-amber-300 animate-bounce" />
+              </span>
+              <div>
+                <span className="font-bold text-white">Ativar Notificações no seu Computador (Windows):</span>{' '}
+                <span className="text-blue-100">
+                  Receba o pop-up nativo do Windows e sinal sonoro mesmo com o navegador minimizado ou quando estiver em outros programas.
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={handleToggleWindowsNotifications}
+              className="px-4 py-1.5 bg-white text-blue-700 font-bold rounded-lg hover:bg-blue-50 transition-colors shadow-sm shrink-0 whitespace-nowrap ml-3"
+            >
+              Ativar no Windows Agora
+            </button>
+          </div>
+        )}
+        {notifPermission === 'denied' && (
+          <div className="bg-amber-500 text-slate-950 px-5 py-2 flex items-center justify-between text-xs font-semibold shadow-md shrink-0">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-slate-950 shrink-0" />
+              <span>
+                <strong>Notificações bloqueadas pelo navegador:</strong> Para receber os alertas na tela do Windows, clique no ícone de <strong>Cadeado / Permissões</strong> na barra de endereços do seu navegador (ao lado da URL) e altere "Notificações" para <strong>Permitir</strong>.
+              </span>
+            </div>
+            <button
+              onClick={() => setNotifPermission(getNotificationPermissionStatus())}
+              className="px-2.5 py-1 bg-slate-950 text-white font-medium rounded hover:bg-slate-800 transition-colors shrink-0 ml-3 whitespace-nowrap"
+            >
+              Já permiti, verificar
+            </button>
+          </div>
+        )}
+
         {renderMainContent()}
       </div>
 
@@ -529,6 +752,53 @@ export const App: React.FC = () => {
           setActiveMenu('atendimento_chat');
         }}
       />
+
+      {/* Popup / Toast do Sistema para Novas Mensagens do Cliente em Atendimento Ativo (Estilo Windows Toast no canto inferior direito) */}
+      {toastPopup && (
+        <div
+          onClick={() => {
+            setSelectedId(toastPopup.conversationId);
+            setActiveTab('active');
+            setToastPopup(null);
+          }}
+          className="fixed bottom-5 right-5 z-50 max-w-sm w-full bg-slate-900/95 backdrop-blur-md text-white border border-slate-700/80 rounded-2xl shadow-2xl shadow-black/40 p-4 cursor-pointer hover:border-blue-500 transition-all transform animate-in slide-in-from-bottom-5 duration-300 flex items-start gap-3 select-none"
+        >
+          <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-sm shrink-0 shadow-md shadow-blue-600/30">
+            {toastPopup.clientName.charAt(0).toUpperCase()}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-xs font-bold text-white truncate">
+                {toastPopup.clientName}
+              </h4>
+              <span className="text-[10px] font-semibold text-blue-300 bg-blue-950/80 px-2 py-0.5 rounded-full border border-blue-700/50">
+                Atendimento Ativo
+              </span>
+            </div>
+            <p className="text-xs text-slate-300 mt-1 line-clamp-2 leading-relaxed">
+              {toastPopup.content}
+            </p>
+            <div className="flex items-center justify-between mt-2 pt-1 border-t border-slate-800">
+              <span className="text-[10px] text-blue-400 font-medium flex items-center gap-1">
+                💬 Clique para responder agora
+              </span>
+              <span className="text-[10px] text-slate-500 capitalize">
+                {toastPopup.channel || 'chat'}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setToastPopup(null);
+            }}
+            className="text-slate-400 hover:text-white p-1 -mr-1 -mt-1 rounded-lg hover:bg-slate-800 transition-colors"
+            title="Fechar notificação"
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,6 +1,6 @@
 export type SenderType = 'client' | 'operator' | 'system';
 export type MessageStatus = 'pending' | 'sent' | 'delivered' | 'read';
-export type ConversationStatus = 'waiting' | 'active' | 'closed' | 'waiting_rating';
+export type ConversationStatus = 'waiting' | 'active' | 'closed' | 'waiting_rating' | 'bot';
 
 export interface Message {
   id: string;
@@ -35,6 +35,10 @@ export interface Conversation {
   channelMeta?: Record<string, any>;
   rating?: number;
   closedAt?: string;
+  closedBy?: string;
+  closeReason?: string;
+  botStep?: string;
+  botNodeId?: string;
   createdAt: string;
   updatedAt: string;
 }

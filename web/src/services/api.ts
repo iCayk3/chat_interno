@@ -238,11 +238,11 @@ export const api = {
     return res.json();
   },
 
-  async closeConversation(id: string, reason?: string): Promise<void> {
+  async closeConversation(id: string, reason?: string, closedBy?: string): Promise<void> {
     const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/close`, {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({ reason, closedBy }),
     });
     if (!res.ok) throw new Error('Falha ao encerrar conversa');
   },

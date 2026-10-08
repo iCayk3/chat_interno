@@ -18,6 +18,7 @@ import {
   Send,
   CornerDownRight,
   Smartphone,
+  Clock,
 } from 'lucide-react';
 import type { ChatSettings, FlowNode, FlowActionType, UserRole, AuthUser } from '../../types/crm';
 import { api } from '../../services/api';
@@ -578,6 +579,75 @@ export const FluxoConfiguracoesView: React.FC<FluxoConfiguracoesViewProps> = ({
                 onChange={(e) => setSettings({ ...settings, outOfHoursMessage: e.target.value })}
                 className="w-full text-sm p-3.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 text-slate-800"
               />
+            </div>
+
+            {/* Bloco 5: Inatividade e Transbordo no Chatbot */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-amber-500" />
+                    <h3 className="text-sm font-bold text-slate-900">
+                      Inatividade e Transbordo no Chatbot
+                    </h3>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Se o cliente iniciar o atendimento no bot e não selecionar nenhuma opção dentro do prazo, ele será transferido automaticamente para a fila humana do setor configurado.
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold border border-amber-200">
+                  Transbordo Automático
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Tempo Limite de Inatividade (Minutos):
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={settings.botTimeoutMinutes ?? 3}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        botTimeoutMinutes: Math.max(1, parseInt(e.target.value) || 3),
+                      })
+                    }
+                    className="w-full text-sm p-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 text-slate-800 font-medium"
+                    placeholder="3"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Padrão: 3 minutos antes da transferência automática para a fila.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Setor Padrão para Transbordo:
+                  </label>
+                  <select
+                    value={settings.botFallbackDept || 'Suporte Técnico'}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        botFallbackDept: e.target.value,
+                      })
+                    }
+                    className="w-full text-sm p-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 text-slate-800 font-medium bg-white"
+                  >
+                    <option value="Suporte Técnico">Suporte Técnico</option>
+                    <option value="Comercial">Comercial</option>
+                    <option value="Financeiro">Financeiro</option>
+                    <option value="Atendimento Geral">Atendimento Geral</option>
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Padrão: Suporte Técnico. Setor que receberá o atendimento na fila.
+                  </p>
+                </div>
+              </div>
             </div>
 
             <div className="flex justify-end pt-2">

@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Conversation, ConversationStatus } from '../types/chat';
 import type { UserRole, AuthUser } from '../types/crm';
-import { Search, Clock, CheckCircle2, MessageSquare, AlertCircle, RotateCcw, Send, Smartphone, Globe, Radio, UserPlus, Star } from 'lucide-react';
+import { Search, Clock, CheckCircle2, MessageSquare, AlertCircle, RotateCcw, Send, Smartphone, Globe, Radio, UserPlus, Star, Bot, Bell } from 'lucide-react';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -16,6 +16,8 @@ interface SidebarProps {
   onOpenNewChat?: () => void;
   userRole?: UserRole;
   currentUser?: AuthUser | null;
+  notificationPermission?: NotificationPermission;
+  onToggleNotification?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -31,14 +33,46 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenNewChat,
   userRole,
   currentUser,
+  notificationPermission,
+  onToggleNotification,
 }) => {
-  const waitingCount = conversations.filter(c => c.status === 'waiting').length;
+  const isSameDay = (dateStr?: string) => {
+    if (!dateStr) return false;
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return false;
+    const now = new Date();
+    return (
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate()
+    );
+  };
+
+  const isClosedByCurrentUser = (c: Conversation) => {
+    if (!currentUser) return true;
+    return (
+      c.closedBy === currentUser.id ||
+      c.closedBy === currentUser.name ||
+      c.operator?.id === currentUser.id ||
+      (c.operator && currentUser.name && c.operator.name === currentUser.name)
+    );
+  };
+
+  const isFinishedTodayByCurrentUser = (c: Conversation) => {
+    const isClosedStatus = c.status === 'closed' || c.status === 'waiting_rating';
+    if (!isClosedStatus) return false;
+    return isSameDay(c.closedAt || c.updatedAt) && isClosedByCurrentUser(c);
+  };
+
+  const waitingCount = conversations.filter(c => c.status === 'waiting' || c.status === 'bot').length;
   const activeCount = conversations.filter(c => c.status === 'active').length;
-  const closedCount = conversations.filter(c => c.status === 'closed' || c.status === 'waiting_rating').length;
+  const closedCount = conversations.filter(isFinishedTodayByCurrentUser).length;
 
   const filtered = conversations.filter(c => {
     const matchesTab = activeTab === 'closed'
-      ? (c.status === 'closed' || c.status === 'waiting_rating')
+      ? isFinishedTodayByCurrentUser(c)
+      : activeTab === 'waiting'
+      ? (c.status === 'waiting' || c.status === 'bot')
       : c.status === activeTab;
     const term = searchTerm.toLowerCase();
     const matchesSearch = c.clientName.toLowerCase().includes(term) ||
@@ -133,15 +167,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {onResetAll && userRole !== 'operador' && (
-          <button
-            onClick={onResetAll}
-            title="Limpar histórico e resetar todos os atendimentos do zero (Admin/Gestor)"
-            className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-          >
-            <RotateCcw className="w-4 h-4" />
-          </button>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {onToggleNotification && (
+            <button
+              onClick={onToggleNotification}
+              title={
+                notificationPermission === 'granted'
+                  ? 'Notificações no Windows ATIVAS (Clique para enviar teste no Windows)'
+                  : notificationPermission === 'denied'
+                  ? 'Notificações BLOQUEADAS no navegador (Clique para instruções)'
+                  : 'Clique para ATIVAR Notificações na Área de Trabalho do Windows'
+              }
+              className={`p-2 rounded-lg transition-all ${
+                notificationPermission === 'granted'
+                  ? 'text-blue-600 hover:bg-blue-50 hover:text-blue-700'
+                  : notificationPermission === 'denied'
+                  ? 'text-rose-500 bg-rose-50 hover:bg-rose-100'
+                  : 'text-amber-600 bg-amber-50 hover:bg-amber-100 animate-pulse'
+              }`}
+            >
+              <Bell className="w-4 h-4" />
+            </button>
+          )}
+
+          {onResetAll && userRole !== 'operador' && (
+            <button
+              onClick={onResetAll}
+              title="Limpar histórico e resetar todos os atendimentos do zero (Admin/Gestor)"
+              className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Search Input */}
@@ -222,7 +280,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {filtered.length === 0 ? (
           <div className="p-8 text-center text-slate-400 text-sm flex flex-col items-center gap-2">
             <MessageSquare className="w-8 h-8 stroke-[1.5] text-slate-300" />
-            <p>Nenhum atendimento nesta aba</p>
+            <p>
+              {activeTab === 'closed'
+                ? 'Nenhum atendimento finalizado por você hoje'
+                : 'Nenhum atendimento nesta aba'}
+            </p>
           </div>
         ) : (
           filtered.map((conv) => {
@@ -265,6 +327,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <span className="flex items-center gap-1 text-amber-600 font-medium text-[11px]">
                       <AlertCircle className="w-3 h-3" />
                       Aguardando
+                    </span>
+                  )}
+                  {conv.status === 'bot' && (
+                    <span className="flex items-center gap-1 text-cyan-700 font-semibold text-[10px] bg-cyan-50 px-1.5 py-0.5 rounded border border-cyan-200" title="Cliente no fluxo de identificação">
+                      <Bot className="w-3 h-3 text-cyan-600" />
+                      Identificando
                     </span>
                   )}
                   {conv.status === 'active' && (

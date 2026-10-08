@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { Conversation, Message } from '../types/chat';
-import { Send, UserCheck, XCircle, MessageSquareOff, CheckCheck, Check, FileText, Download, Clock, Smartphone, Globe, Radio, MessageSquare, Star } from 'lucide-react';
+import { Send, UserCheck, XCircle, MessageSquareOff, CheckCheck, Check, FileText, Download, Clock, Smartphone, Globe, Radio, MessageSquare, Star, Bot } from 'lucide-react';
 
 interface ChatAreaProps {
   conversation: Conversation | null;
@@ -172,9 +172,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
                 conversation.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
                 conversation.status === 'waiting' ? 'bg-amber-100 text-amber-700' :
+                conversation.status === 'bot' ? 'bg-cyan-100 text-cyan-800' :
                 conversation.status === 'waiting_rating' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-500'
               }`}>
                 {conversation.status === 'waiting' ? 'Aguardando' :
+                 conversation.status === 'bot' ? 'No Chatbot' :
                  conversation.status === 'active' ? 'Em Atendimento' :
                  conversation.status === 'waiting_rating' ? 'Aguardando Nota' : 'Finalizado'}
               </span>
@@ -237,7 +239,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {/* Action Buttons */}
         <div className="flex items-center gap-2 shrink-0">
-          {conversation.status === 'waiting' && (
+          {(conversation.status === 'waiting' || conversation.status === 'bot') && (
             <button
               onClick={onAssign}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs shadow-xs transition-colors"
@@ -370,6 +372,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <span className="text-[10px] font-semibold text-purple-600 bg-purple-100/70 px-2 py-1 rounded-md shrink-0 border border-purple-200">
               Timeout 10 min
             </span>
+          </div>
+        ) : conversation.status === 'bot' ? (
+          <div className="p-4 bg-cyan-50/80 border border-cyan-200 rounded-xl flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-cyan-100 border border-cyan-200 flex items-center justify-center text-cyan-700 shrink-0">
+                <Bot className="w-5 h-5 text-cyan-600" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="text-xs font-bold text-cyan-900 truncate">
+                  Cliente no Chatbot de Identificação
+                </h4>
+                <p className="text-[11px] text-cyan-700 mt-0.5 leading-snug">
+                  O cliente está interagindo com o bot para informar CPF/dados. Você pode assumir o atendimento agora mesmo se preferir.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onAssign}
+              className="px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white font-bold text-xs shadow-xs flex items-center gap-2 transition-all shrink-0 cursor-pointer hover:shadow-md"
+            >
+              <UserCheck className="w-4 h-4" />
+              <span>Assumir Agora</span>
+            </button>
           </div>
         ) : conversation.status === 'waiting' ? (
           <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl flex items-center justify-between gap-4">

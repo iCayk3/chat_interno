@@ -44,6 +44,8 @@ export interface ChatSettings {
   chatbotFlow?: FlowNode;
   aiEnabled: boolean;
   aiPrompt: string;
+  botTimeoutMinutes?: number;
+  botFallbackDept?: string;
 }
 
 // Modelos de Integração com o ERP RBXSoft ISP

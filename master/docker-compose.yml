@@ -1,0 +1,21 @@
+services:
+  master:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sol-master-license
+    restart: always
+    environment:
+      - PORT=8090
+      - DATA_FILE_PATH=/app/data/master_licenses.json
+      - MASTER_JWT_SECRET=${MASTER_JWT_SECRET:-sol-master-ultra-secure-key-2026}
+      - SUPPORT_CONTACT_PHONE=${SUPPORT_CONTACT_PHONE:-(11) 98765-4321}
+      - SUPPORT_CONTACT_EMAIL=${SUPPORT_CONTACT_EMAIL:-comercial@soltelecom.com.br}
+    ports:
+      - "${MASTER_PORT:-8090}:8090"
+    volumes:
+      - master_data:/app/data
+
+volumes:
+  master_data:
+    name: sol_master_license_data

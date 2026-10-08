@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Master License Control Plane — SOL Telecom</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; }
+    .status-active { background-color: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .status-trial { background-color: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .status-suspended { background-color: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .status-cortesia { background-color: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 sticky top-0 z-40 flex flex-wrap items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-white shadow-lg shadow-emerald-500/20">
+        <i class="fa-solid fa-shield-halved text-lg"></i>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold text-white flex items-center gap-2">
+          Master License Control Plane
+          <span class="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider">Super Sistema Mestre</span>
+        </h1>
+        <p class="text-xs text-slate-400">Controle central de ativações, períodos de testes (Trial), suspensões, bloqueios e descontos</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <button onclick="openNewTenantModal()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-md shadow-emerald-600/20">
+        <i class="fa-solid fa-plus"></i> Novo Cliente / Gerar Licença
+      </button>
+      <button onclick="fetchData()" class="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition-colors border border-slate-700" title="Atualizar dados">
+        <i class="fa-solid fa-arrows-rotate"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+
+    <!-- Metrics Cards -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+        <span class="text-xs text-slate-400 font-medium block">Total de Instalações</span>
+        <div class="mt-2 flex items-center justify-between">
+          <span id="metric-total" class="text-2xl font-bold text-white">0</span>
+          <i class="fa-solid fa-server text-slate-600 text-xl"></i>
+        </div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+        <span class="text-xs text-slate-400 font-medium block">Clientes Ativos</span>
+        <div class="mt-2 flex items-center justify-between">
+          <span id="metric-active" class="text-2xl font-bold text-emerald-400">0</span>
+          <i class="fa-solid fa-circle-check text-emerald-500/30 text-xl"></i>
+        </div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+        <span class="text-xs text-slate-400 font-medium block">Em Avaliação (Trial)</span>
+        <div class="mt-2 flex items-center justify-between">
+          <span id="metric-trial" class="text-2xl font-bold text-amber-400">0</span>
+          <i class="fa-solid fa-clock text-amber-500/30 text-xl"></i>
+        </div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+        <span class="text-xs text-slate-400 font-medium block">Suspensos / Bloqueados</span>
+        <div class="mt-2 flex items-center justify-between">
+          <span id="metric-suspended" class="text-2xl font-bold text-red-400">0</span>
+          <i class="fa-solid fa-ban text-red-500/30 text-xl"></i>
+        </div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+        <span class="text-xs text-slate-400 font-medium block">Faturamento Estimado (MRR)</span>
+        <div class="mt-2 flex items-center justify-between">
+          <span id="metric-mrr" class="text-xl font-bold text-blue-400">R$ 0,00</span>
+          <i class="fa-solid fa-wallet text-blue-500/30 text-xl"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tenants Table -->
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
+      <div class="px-6 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-users text-emerald-400 text-sm"></i>
+            Clientes & Instalações Gerenciadas
+          </h2>
+          <p class="text-xs text-slate-400">Monitore batimentos cardíacos (heartbeat), libere bloqueios ou altere prazos de testes</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="search-input" onkeyup="filterTenants()" type="text" placeholder="Buscar por cliente, CNPJ ou chave..." class="bg-slate-800 border border-slate-700 text-xs rounded-xl px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 w-64">
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs">
+          <thead class="bg-slate-950/70 border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold">
+            <tr>
+              <th class="px-6 py-3">Cliente / Razão Social</th>
+              <th class="px-6 py-3">Chave de Licença</th>
+              <th class="px-6 py-3">Status</th>
+              <th class="px-6 py-3">Trial / Expiração</th>
+              <th class="px-6 py-3">Preço / Desconto</th>
+              <th class="px-6 py-3">Último Heartbeat</th>
+              <th class="px-6 py-3 text-right">Ações de Controle</th>
+            </tr>
+          </thead>
+          <tbody id="tenants-table-body" class="divide-y divide-slate-800">
+            <tr>
+              <td colspan="7" class="px-6 py-8 text-center text-slate-500">
+                <i class="fa-solid fa-spinner fa-spin text-lg text-emerald-500 mb-2"></i>
+                <p>Carregando dados das licenças...</p>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <!-- Modal: Novo Cliente / Licença -->
+  <div id="modal-new-tenant" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-xl p-6 shadow-2xl text-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-key text-emerald-400"></i>
+          Cadastrar Novo Cliente / Gerar Licença
+        </h3>
+        <button onclick="closeModal('modal-new-tenant')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <form onsubmit="handleCreateTenant(event)" class="space-y-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Razão Social / Nome da Empresa *</label>
+            <input id="new-name" required type="text" placeholder="Ex: Provedor Alfa Fibra" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">CNPJ</label>
+            <input id="new-cnpj" type="text" placeholder="00.000.000/0000-00" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Tipo de Licença</label>
+            <select id="new-type" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+              <option value="trial">Avaliação Gratuita (Trial)</option>
+              <option value="paid">Comercial Pago</option>
+              <option value="cortesia">Cortesia Especial</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Dias de Trial</label>
+            <input id="new-trial-days" type="number" value="30" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Valor Mensal (R$)</label>
+            <input id="new-price" type="number" step="0.01" value="299.90" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Desconto Especial (Descrição)</label>
+            <input id="new-discount-desc" type="text" placeholder="Ex: Desconto de Pioneiro 30%" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Valor do Desconto (R$)</label>
+            <input id="new-discount-val" type="number" step="0.01" value="0" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Contato / Responsável</label>
+            <input id="new-contact" type="text" placeholder="Nome do cliente" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">WhatsApp / Telefone</label>
+            <input id="new-phone" type="text" placeholder="(11) 99999-9999" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+          <button type="button" onclick="closeModal('modal-new-tenant')" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-medium">Cancelar</button>
+          <button type="submit" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/30">
+            <i class="fa-solid fa-check"></i> Gerar Licença
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Suspender / Bloquear -->
+  <div id="modal-suspend" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-red-500/30 rounded-2xl w-full max-w-md p-6 shadow-2xl text-slate-200 space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-red-400 flex items-center gap-2">
+          <i class="fa-solid fa-ban"></i>
+          Bloquear / Suspender Instalação
+        </h3>
+        <button onclick="closeModal('modal-suspend')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <input type="hidden" id="suspend-tenant-id">
+      <div>
+        <label class="block text-xs font-semibold text-slate-400 mb-1">Motivo do Bloqueio (visível para o cliente no painel)</label>
+        <textarea id="suspend-reason" rows="3" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-white focus:outline-none focus:border-red-500" placeholder="Ex: Período de avaliação de 30 dias expirado ou anuidade pendente de regularização."></textarea>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+        <button type="button" onclick="closeModal('modal-suspend')" class="px-3 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs">Cancelar</button>
+        <button onclick="confirmSuspend()" class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5">
+          <i class="fa-solid fa-lock"></i> Confirmar Bloqueio Imediato
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Estender Período de Testes (Trial) -->
+  <div id="modal-extend" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-amber-500/30 rounded-2xl w-full max-w-md p-6 shadow-2xl text-slate-200 space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-amber-400 flex items-center gap-2">
+          <i class="fa-solid fa-clock-rotate-left"></i>
+          Estender Período de Avaliação Gratuita
+        </h3>
+        <button onclick="closeModal('modal-extend')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <input type="hidden" id="extend-tenant-id">
+      <div>
+        <label class="block text-xs font-semibold text-slate-400 mb-2">Quantos dias adicionais deseja conceder?</label>
+        <div class="grid grid-cols-3 gap-2">
+          <button type="button" onclick="setExtendDays(15)" class="py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-amber-300 transition-colors">+15 Dias</button>
+          <button type="button" onclick="setExtendDays(30)" class="py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-amber-300 transition-colors">+30 Dias</button>
+          <button type="button" onclick="setExtendDays(60)" class="py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-amber-300 transition-colors">+60 Dias</button>
+        </div>
+        <div class="mt-3">
+          <label class="block text-[11px] text-slate-400 mb-1">Ou digite quantidade personalizada de dias:</label>
+          <input id="extend-custom-days" type="number" value="30" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500">
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+        <button type="button" onclick="closeModal('modal-extend')" class="px-3 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs">Cancelar</button>
+        <button onclick="confirmExtend()" class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5">
+          <i class="fa-solid fa-check"></i> Prorrogar Avaliação
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Conceder Desconto Promocional -->
+  <div id="modal-discount" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-purple-500/30 rounded-2xl w-full max-w-md p-6 shadow-2xl text-slate-200 space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-purple-400 flex items-center gap-2">
+          <i class="fa-solid fa-tag"></i>
+          Conceder Desconto Promocional
+        </h3>
+        <button onclick="closeModal('modal-discount')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <input type="hidden" id="discount-tenant-id">
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-semibold text-slate-400 mb-1">Descrição do Desconto</label>
+          <input id="discount-desc" type="text" placeholder="Ex: Desconto de Pioneiro 40%" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Valor Desconto (R$)</label>
+            <input id="discount-amount" type="number" step="0.01" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 mb-1">Preço Final (R$)</label>
+            <input id="discount-final-price" type="number" step="0.01" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+        <button type="button" onclick="closeModal('modal-discount')" class="px-3 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs">Cancelar</button>
+        <button onclick="confirmDiscount()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5">
+          <i class="fa-solid fa-check"></i> Aplicar Desconto
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Dados de Pagamento PIX para Regularização -->
+  <div id="modal-billing" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-emerald-500/30 rounded-2xl w-full max-w-md p-6 shadow-2xl text-slate-200 space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-emerald-400 flex items-center gap-2">
+          <i class="fa-solid fa-qrcode"></i>
+          Configurar Cobrança PIX
+        </h3>
+        <button onclick="closeModal('modal-billing')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <input type="hidden" id="billing-tenant-id">
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-semibold text-slate-400 mb-1">PIX Copia e Cola</label>
+          <textarea id="billing-pix" rows="3" placeholder="00020126580014br.gov.bcb.pix..." class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"></textarea>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-400 mb-1">Valor da Cobrança (R$)</label>
+          <input id="billing-amount" type="number" step="0.01" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+        <button type="button" onclick="closeModal('modal-billing')" class="px-3 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs">Cancelar</button>
+        <button onclick="confirmBilling()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5">
+          <i class="fa-solid fa-check"></i> Salvar Cobrança PIX
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let tenants = [];
+
+    async function fetchData() {
+      try {
+        const [tenantsRes, statsRes] = await Promise.all([
+          fetch('/api/v1/master/tenants'),
+          fetch('/api/v1/master/stats')
+        ]);
+        tenants = await tenantsRes.json();
+        const stats = await statsRes.json();
+        updateStats(stats);
+        renderTenants(tenants);
+      } catch (err) {
+        console.error('Erro ao carregar dados:', err);
+      }
+    }
+
+    function updateStats(stats) {
+      document.getElementById('metric-total').textContent = stats.totalTenants || 0;
+      document.getElementById('metric-active').textContent = stats.activeTenants || 0;
+      document.getElementById('metric-trial').textContent = stats.trialTenants || 0;
+      document.getElementById('metric-suspended').textContent = stats.suspendedTenants || 0;
+      const mrr = stats.totalMonthlyMrr || 0;
+      document.getElementById('metric-mrr').textContent = mrr.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    }
+
+    function renderTenants(list) {
+      const tbody = document.getElementById('tenants-table-body');
+      if (!list || list.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="px-6 py-8 text-center text-slate-500">Nenhum cliente cadastrado ainda. Clique em "Novo Cliente" para começar.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = list.map(t => {
+        let statusBadge = '';
+        if (t.status === 'active') {
+          statusBadge = '<span class="px-2.5 py-1 rounded-full text-[10px] font-bold status-active uppercase"><i class="fa-solid fa-circle-check mr-1"></i>Ativo</span>';
+        } else if (t.status === 'trial') {
+          statusBadge = '<span class="px-2.5 py-1 rounded-full text-[10px] font-bold status-trial uppercase"><i class="fa-solid fa-clock mr-1"></i>Trial</span>';
+        } else if (t.status === 'suspended') {
+          statusBadge = '<span class="px-2.5 py-1 rounded-full text-[10px] font-bold status-suspended uppercase"><i class="fa-solid fa-ban mr-1"></i>Suspenso</span>';
+        } else if (t.licenseType === 'cortesia') {
+          statusBadge = '<span class="px-2.5 py-1 rounded-full text-[10px] font-bold status-cortesia uppercase"><i class="fa-solid fa-gift mr-1"></i>Cortesia</span>';
+        }
+
+        let heartbeatText = '<span class="text-slate-500">Nunca conectou</span>';
+        if (t.lastHeartbeatAt && !t.lastHeartbeatAt.startsWith('0001')) {
+          const date = new Date(t.lastHeartbeatAt);
+          const diffMinutes = Math.round((new Date() - date) / 60000);
+          if (diffMinutes < 15) {
+            heartbeatText = '<span class="text-emerald-400 font-semibold flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>Online</span>';
+          } else {
+            heartbeatText = '<span class="text-slate-400">' + date.toLocaleDateString('pt-BR') + ' ' + date.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}) + '</span>';
+          }
+        }
+
+        const priceFormatted = (t.paymentAmount || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+
+        return `
+          <tr class="hover:bg-slate-900/60 transition-colors">
+            <td class="px-6 py-4">
+              <div class="font-bold text-white text-xs">${t.tenantName}</div>
+              <div class="text-[11px] text-slate-400">${t.tenantCnpj ? 'CNPJ: ' + t.tenantCnpj : (t.contactPhone ? 'Tel: ' + t.contactPhone : 'Sem CNPJ')}</div>
+            </td>
+            <td class="px-6 py-4">
+              <div class="flex items-center gap-1.5">
+                <code class="bg-slate-800 text-emerald-400 px-2 py-1 rounded font-mono text-[11px] select-all border border-slate-700/60">${t.licenseKey}</code>
+                <button onclick="copyToClipboard('${t.licenseKey}')" class="p-1 text-slate-400 hover:text-white" title="Copiar Chave"><i class="fa-solid fa-copy"></i></button>
+              </div>
+            </td>
+            <td class="px-6 py-4">${statusBadge}</td>
+            <td class="px-6 py-4">
+              ${t.status === 'trial' ? `<div class="font-bold text-amber-300">${t.trialDaysRemaining} dias restantes</div>` : ''}
+              <div class="text-[11px] text-slate-400">Expira: ${new Date(t.expiresAt).toLocaleDateString('pt-BR')}</div>
+            </td>
+            <td class="px-6 py-4">
+              <div class="font-bold text-slate-200">${priceFormatted}</div>
+              ${t.discountDescription ? `<div class="text-[10px] text-purple-300 font-medium">${t.discountDescription}</div>` : ''}
+            </td>
+            <td class="px-6 py-4">${heartbeatText}</td>
+            <td class="px-6 py-4 text-right">
+              <div class="flex items-center justify-end gap-1.5">
+                ${t.status === 'suspended' ? `
+                  <button onclick="activateTenant('${t.id}')" class="px-2 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded text-[11px] font-semibold transition-colors" title="Reativar / Liberar"><i class="fa-solid fa-lock-open mr-1"></i>Liberar</button>
+                ` : `
+                  <button onclick="openSuspendModal('${t.id}')" class="px-2 py-1 bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 rounded text-[11px] font-semibold transition-colors" title="Suspender / Bloquear"><i class="fa-solid fa-lock mr-1"></i>Bloquear</button>
+                `}
+                <button onclick="openExtendModal('${t.id}')" class="px-2 py-1 bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/30 rounded text-[11px] font-semibold transition-colors" title="Prorrogar Testes"><i class="fa-solid fa-clock mr-1"></i>+Dias</button>
+                <button onclick="openDiscountModal('${t.id}', '${t.discountDescription || ''}', ${t.discountAmount || 0}, ${t.paymentAmount || 0})" class="px-2 py-1 bg-purple-600/20 hover:bg-purple-600 text-purple-300 hover:text-white border border-purple-500/30 rounded text-[11px] font-semibold transition-colors" title="Conceder Desconto"><i class="fa-solid fa-tag"></i></button>
+                <button onclick="openBillingModal('${t.id}', '${t.paymentPix || ''}', ${t.paymentAmount || 0})" class="px-2 py-1 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 rounded text-[11px] font-semibold transition-colors" title="Cobrança PIX"><i class="fa-solid fa-qrcode"></i></button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function filterTenants() {
+      const q = document.getElementById('search-input').value.toLowerCase();
+      const filtered = tenants.filter(t => 
+        t.tenantName.toLowerCase().includes(q) ||
+        (t.tenantCnpj && t.tenantCnpj.toLowerCase().includes(q)) ||
+        t.licenseKey.toLowerCase().includes(q)
+      );
+      renderTenants(filtered);
+    }
+
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text);
+      alert('Chave de licença copiada: ' + text);
+    }
+
+    function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
+    function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+    function openNewTenantModal() { openModal('modal-new-tenant'); }
+
+    async function handleCreateTenant(e) {
+      e.preventDefault();
+      const payload = {
+        tenantName: document.getElementById('new-name').value,
+        tenantCnpj: document.getElementById('new-cnpj').value,
+        licenseType: document.getElementById('new-type').value,
+        trialDays: parseInt(document.getElementById('new-trial-days').value) || 30,
+        monthlyPrice: parseFloat(document.getElementById('new-price').value) || 0,
+        discountDescription: document.getElementById('new-discount-desc').value,
+        discountAmount: parseFloat(document.getElementById('new-discount-val').value) || 0,
+        contactPerson: document.getElementById('new-contact').value,
+        contactPhone: document.getElementById('new-phone').value,
+        maxOperators: 10,
+        allowedModules: 'erp,native,omnichannel'
+      };
+
+      try {
+        const res = await fetch('/api/v1/master/tenants', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          closeModal('modal-new-tenant');
+          fetchData();
+        } else {
+          const err = await res.json();
+          alert('Erro ao cadastrar cliente: ' + (err.error || 'Falha'));
+        }
+      } catch (err) {
+        alert('Erro ao conectar ao servidor: ' + err.message);
+      }
+    }
+
+    function openSuspendModal(id) {
+      document.getElementById('suspend-tenant-id').value = id;
+      openModal('modal-suspend');
+    }
+
+    async function confirmSuspend() {
+      const id = document.getElementById('suspend-tenant-id').value;
+      const reason = document.getElementById('suspend-reason').value;
+      try {
+        await fetch('/api/v1/master/tenants/' + id + '/status', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ status: 'suspended', suspensionReason: reason })
+        });
+        closeModal('modal-suspend');
+        fetchData();
+      } catch (err) {
+        alert('Erro: ' + err.message);
+      }
+    }
+
+    async function activateTenant(id) {
+      if (!confirm('Deseja reativar imediatamente esta instalação?')) return;
+      try {
+        await fetch('/api/v1/master/tenants/' + id + '/status', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ status: 'active', suspensionReason: '' })
+        });
+        fetchData();
+      } catch (err) {
+        alert('Erro: ' + err.message);
+      }
+    }
+
+    function openExtendModal(id) {
+      document.getElementById('extend-tenant-id').value = id;
+      openModal('modal-extend');
+    }
+
+    function setExtendDays(days) {
+      document.getElementById('extend-custom-days').value = days;
+    }
+
+    async function confirmExtend() {
+      const id = document.getElementById('extend-tenant-id').value;
+      const days = parseInt(document.getElementById('extend-custom-days').value) || 30;
+      try {
+        await fetch('/api/v1/master/tenants/' + id + '/trial', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ daysToAdd: days })
+        });
+        closeModal('modal-extend');
+        fetchData();
+      } catch (err) {
+        alert('Erro: ' + err.message);
+      }
+    }
+
+    function openDiscountModal(id, desc, amount, price) {
+      document.getElementById('discount-tenant-id').value = id;
+      document.getElementById('discount-desc').value = desc;
+      document.getElementById('discount-amount').value = amount;
+      document.getElementById('discount-final-price').value = price;
+      openModal('modal-discount');
+    }
+
+    async function confirmDiscount() {
+      const id = document.getElementById('discount-tenant-id').value;
+      const desc = document.getElementById('discount-desc').value;
+      const amount = parseFloat(document.getElementById('discount-amount').value) || 0;
+      const price = parseFloat(document.getElementById('discount-final-price').value) || 0;
+      try {
+        await fetch('/api/v1/master/tenants/' + id + '/discount', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ discountDescription: desc, discountAmount: amount, paymentAmount: price })
+        });
+        closeModal('modal-discount');
+        fetchData();
+      } catch (err) {
+        alert('Erro: ' + err.message);
+      }
+    }
+
+    function openBillingModal(id, pix, amount) {
+      document.getElementById('billing-tenant-id').value = id;
+      document.getElementById('billing-pix').value = pix;
+      document.getElementById('billing-amount').value = amount;
+      openModal('modal-billing');
+    }
+
+    async function confirmBilling() {
+      const id = document.getElementById('billing-tenant-id').value;
+      const pix = document.getElementById('billing-pix').value;
+      const amount = parseFloat(document.getElementById('billing-amount').value) || 0;
+      try {
+        await fetch('/api/v1/master/tenants/' + id + '/billing', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ paymentPix: pix, paymentAmount: amount })
+        });
+        closeModal('modal-billing');
+        fetchData();
+      } catch (err) {
+        alert('Erro: ' + err.message);
+      }
+    }
+
+    // Inicializa carregando dados
+    fetchData();
+  </script>
+</body>
+</html>

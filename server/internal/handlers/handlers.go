@@ -470,7 +470,7 @@ func (h *Handler) HandleStartOutboundConversation(w http.ResponseWriter, r *http
 	h.hub.BroadcastToOperators(&models.WSAction{
 		Type:    "message",
 		Payload: msg,
-	})
+	}, conv.ID)
 	h.hub.BroadcastToRoom(conv.ID, &models.WSAction{
 		Type:    "message",
 		Payload: msg,

@@ -28,15 +28,17 @@ type HubBroadcaster interface {
 type ChannelService struct {
 	db          *database.DB
 	chatService *ChatService
+	rbxService  *RBXService
 	hub         HubBroadcaster
 	httpClient  *http.Client
 	mu          sync.RWMutex
 }
 
-func NewChannelService(db *database.DB, chatService *ChatService) *ChannelService {
+func NewChannelService(db *database.DB, chatService *ChatService, rbxService *RBXService) *ChannelService {
 	return &ChannelService{
 		db:          db,
 		chatService: chatService,
+		rbxService:  rbxService,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -1063,6 +1065,574 @@ func extractEvolutionMessageContent(msgData map[string]interface{}) string {
 	return ""
 }
 
+// ProcessIncomingChannelMessage processa a entrada de mensagens unificada para canais externos (WhatsApp, Telegram, etc.)
+// garantindo o fluxo obrigatório de identificação do cliente e consulta automática no ERP RBX.
+func (s *ChannelService) ProcessIncomingChannelMessage(channel, channelID, senderName, content, rawMsgID string) error {
+	channel = strings.TrimSpace(channel)
+	channelID = strings.TrimSpace(channelID)
+	senderName = strings.TrimSpace(senderName)
+	content = strings.TrimSpace(content)
+
+	if content == "" || channelID == "" {
+		return nil
+	}
+
+	if senderName == "" {
+		senderName = fmt.Sprintf("Cliente %s", channelID)
+	}
+
+	now := time.Now().UTC()
+
+	// 1. Procura conversa ativa deste cliente no canal
+	var conv *models.Conversation
+	if s.db != nil {
+		conv, _ = s.db.GetActiveConversationByChannel(channel, channelID)
+	}
+
+	// 2. Se houver conversa aguardando avaliação (CSAT), processa a nota de 1 a 5
+	if conv != nil && conv.Status == models.ConvWaitingRating {
+		rating := ParseRatingNumber(content)
+		if rating >= 1 && rating <= 5 {
+			log.Printf("⭐ [CSAT] Cliente %s (%s - %s) avaliou atendimento %s com nota %d", senderName, channel, channelID, conv.ID, rating)
+
+			clientRatingMsg := &models.Message{
+				ID:             "msg-rate-" + uuid.New().String()[:8],
+				ConversationID: conv.ID,
+				SenderID:       channel + "-" + channelID,
+				SenderType:     models.SenderClient,
+				SenderName:     senderName,
+				Content:        content,
+				Timestamp:      now.Format(time.RFC3339),
+				Status:         models.StatusDelivered,
+			}
+			if s.chatService != nil {
+				_ = s.chatService.SaveMessage(clientRatingMsg)
+			}
+
+			if s.chatService != nil {
+				_, _ = s.chatService.RateConversation(conv.ID, rating, content)
+			}
+
+			thankYouText := fmt.Sprintf("Agradecemos pela sua avaliação (Nota %d)! ⭐\nSua opinião nos ajuda a melhorar cada vez mais.\n\nAtendimento finalizado com sucesso. Tenha um excelente dia!", rating)
+			s.SendMessageToChannel(conv, thankYouText)
+			s.saveSystemMessage(conv.ID, thankYouText)
+
+			s.notifyOperatorsConversationUpdated(conv)
+			return nil
+		}
+
+		reminderText := "O atendimento já foi finalizado pelo atendente.\n\nPara registrar sua avaliação, por favor responda apenas com uma nota de 1 a 5 (onde 1 é Muito Ruim e 5 é Excelente)."
+		s.SendMessageToChannel(conv, reminderText)
+		return nil
+	}
+
+	// 3. Se houver conversa ativa no fluxo do bot (em identificação)
+	if conv != nil && conv.Status == models.ConvBot {
+		msgID := "msg-" + channel + "-" + uuid.New().String()[:8]
+		if rawMsgID != "" {
+			msgID = channel + "-" + rawMsgID
+		}
+
+		clientMsg := &models.Message{
+			ID:             msgID,
+			ConversationID: conv.ID,
+			SenderID:       channel + "-" + channelID,
+			SenderType:     models.SenderClient,
+			SenderName:     senderName,
+			Content:        content,
+			Timestamp:      now.Format(time.RFC3339),
+			Status:         models.StatusDelivered,
+		}
+		if s.chatService != nil {
+			_ = s.chatService.SaveMessage(clientMsg)
+		}
+		s.notifyOperatorsMessage(conv.ID, clientMsg)
+
+		return s.handleBotFlowStep(conv, senderName, content)
+	}
+
+	// 4. Se a conversa já estiver na fila de espera (waiting) ou em atendimento ativo (active)
+	if conv != nil {
+		conv.UpdatedAt = now
+		if s.db != nil {
+			_ = s.db.UpsertConversation(conv)
+		}
+		if s.chatService != nil {
+			s.chatService.UpsertMemoryConversation(conv)
+		}
+
+		msgID := "msg-" + channel + "-" + uuid.New().String()[:8]
+		if rawMsgID != "" {
+			msgID = channel + "-" + rawMsgID
+		}
+
+		clientMsg := &models.Message{
+			ID:             msgID,
+			ConversationID: conv.ID,
+			SenderID:       channel + "-" + channelID,
+			SenderType:     models.SenderClient,
+			SenderName:     senderName,
+			Content:        content,
+			Timestamp:      now.Format(time.RFC3339),
+			Status:         models.StatusDelivered,
+		}
+
+		if s.chatService != nil {
+			_ = s.chatService.SaveMessage(clientMsg)
+		}
+		s.notifyOperatorsMessage(conv.ID, clientMsg)
+
+		log.Printf("📩 [%s] Mensagem recebida de %s (%s): %s", strings.ToUpper(channel), senderName, channelID, content)
+		return nil
+	}
+
+	// 5. NENHUMA CONVERSA ATIVA: Inicia novo atendimento obrigatoriamente no modo BOT / Identificação
+	prefix := channel
+	if len(prefix) > 4 {
+		prefix = prefix[:4]
+	}
+	convID := fmt.Sprintf("conv-%s-%s", prefix, uuid.New().String()[:8])
+	conv = &models.Conversation{
+		ID:          convID,
+		ClientID:    channel + "-" + channelID,
+		ClientName:  senderName,
+		ContactName: senderName,
+		Department:  "Atendimento Geral",
+		Status:      models.ConvBot,
+		BotStep:     "awaiting_doc",
+		Channel:     channel,
+		ChannelID:   channelID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if s.db != nil {
+		_ = s.db.UpsertConversation(conv)
+	}
+	if s.chatService != nil {
+		s.chatService.UpsertMemoryConversation(conv)
+	}
+
+	// Salva a mensagem inicial que o cliente enviou
+	msgID := "msg-" + channel + "-" + uuid.New().String()[:8]
+	if rawMsgID != "" {
+		msgID = channel + "-" + rawMsgID
+	}
+	firstMsg := &models.Message{
+		ID:             msgID,
+		ConversationID: conv.ID,
+		SenderID:       channel + "-" + channelID,
+		SenderType:     models.SenderClient,
+		SenderName:     senderName,
+		Content:        content,
+		Timestamp:      now.Format(time.RFC3339),
+		Status:         models.StatusDelivered,
+	}
+	if s.chatService != nil {
+		_ = s.chatService.SaveMessage(firstMsg)
+	}
+
+	// Notifica operadores que há um novo cliente entrando no fluxo
+	s.notifyOperatorsNewChat(conv, firstMsg)
+
+	// Envia saudação e solicita CPF ou CNPJ do titular
+	welcomeMsg := "Olá! Seja bem-vindo à Central de Atendimento da SOL Provedor. ☀️👋\n\nPara localizarmos seu cadastro e agilizarmos seu atendimento, por favor digite o CPF ou CNPJ do titular da conta (somente números):"
+	s.SendMessageToChannel(conv, welcomeMsg)
+	s.saveSystemMessage(conv.ID, welcomeMsg)
+
+	log.Printf("🤖 [%s] Novo cliente %s (%s) iniciado no fluxo de identificação obrigatório (ConvID: %s)", strings.ToUpper(channel), senderName, channelID, conv.ID)
+	return nil
+}
+
+// handleBotFlowStep gerencia as etapas sequenciais do chatbot / identificação do cliente
+func (s *ChannelService) handleBotFlowStep(conv *models.Conversation, senderName, content string) error {
+	now := time.Now().UTC()
+	step := conv.BotStep
+	if step == "" {
+		step = "awaiting_doc"
+	}
+
+	switch step {
+	case "awaiting_doc":
+		cleanDoc := CleanDoc(content)
+		if len(cleanDoc) != 11 && len(cleanDoc) != 14 {
+			retryText := "Não consegui identificar um CPF ou CNPJ válido.\n\nPor favor, digite o CPF (11 dígitos) ou CNPJ (14 dígitos) do titular do plano, contendo somente os números:"
+			s.SendMessageToChannel(conv, retryText)
+			s.saveSystemMessage(conv.ID, retryText)
+			return nil
+		}
+
+		conv.CpfCnpj = cleanDoc
+		conv.UpdatedAt = now
+
+		// Consulta no ERP RBX Soft
+		var rbxClient *models.RBXClient
+		if s.rbxService != nil {
+			rbxClient, _ = s.rbxService.LookupClientByCPFCNPJ(context.Background(), cleanDoc)
+		}
+
+		// Consulta dados de rede física (OLT, PON, CTO)
+		if s.db != nil {
+			olt, pon, cto, _ := s.db.GetCustomerNetwork(cleanDoc)
+			if olt != "" || cto != "" {
+				conv.OLT = olt
+				conv.PON = pon
+				conv.CTO = cto
+			}
+		}
+
+		if rbxClient != nil {
+			// Cliente localizado no RBX!
+			conv.ClientName = rbxClient.Nome
+			conv.ContactName = senderName
+			if rbxClient.ContratoDescricao != "" {
+				conv.RbxGroup = rbxClient.ContratoDescricao
+			}
+
+			// Verifica configurações de fluxo do chatbot
+			var settings *models.ChatSettings
+			if s.db != nil {
+				settings, _ = s.db.GetChatSettings()
+			}
+
+			if settings != nil && settings.EnableBotFlow {
+				conv.BotStep = "menu"
+				if s.db != nil {
+					_ = s.db.UpsertConversation(conv)
+				}
+				if s.chatService != nil {
+					s.chatService.UpsertMemoryConversation(conv)
+				}
+
+				menuText := fmt.Sprintf("Identificamos seu cadastro, *%s*! ☀️\n\nComo podemos te ajudar hoje? Digite o número da opção desejada:\n\n1️⃣ - 2ª Via de Fatura / Código PIX\n2️⃣ - Suporte Técnico / Conexão\n3️⃣ - Planos e Contratação\n0️⃣ - Falar com um Atendente", rbxClient.Nome)
+				s.SendMessageToChannel(conv, menuText)
+				s.saveSystemMessage(conv.ID, menuText)
+				s.notifyOperatorsConversationUpdated(conv)
+			} else {
+				// Bot desativado: transfere direto para a fila de espera com os dados preenchidos
+				conv.Status = models.ConvWaiting
+				conv.BotStep = ""
+				conv.Department = "Suporte Técnico"
+				if s.db != nil {
+					_ = s.db.UpsertConversation(conv)
+				}
+				if s.chatService != nil {
+					s.chatService.UpsertMemoryConversation(conv)
+				}
+
+				queueMsg := fmt.Sprintf("Olá, *%s*! Seu cadastro foi identificado com sucesso. ☀️\n\nEstamos transferindo você para a nossa fila de atendimento. Em instantes um operador irá lhe atender!", rbxClient.Nome)
+				s.SendMessageToChannel(conv, queueMsg)
+				s.saveSystemMessage(conv.ID, queueMsg)
+				s.notifyOperatorsConversationUpdated(conv)
+			}
+		} else {
+			// Cliente não localizado no RBX: solicita nome completo
+			conv.BotStep = "awaiting_name"
+			if s.db != nil {
+				_ = s.db.UpsertConversation(conv)
+			}
+			if s.chatService != nil {
+				s.chatService.UpsertMemoryConversation(conv)
+			}
+
+			askNameText := "Não localizamos um contrato ativo com o documento informado. Sem problemas!\n\nPor favor, digite seu *Nome Completo* para continuarmos o atendimento:"
+			s.SendMessageToChannel(conv, askNameText)
+			s.saveSystemMessage(conv.ID, askNameText)
+			s.notifyOperatorsConversationUpdated(conv)
+		}
+		return nil
+
+	case "awaiting_name":
+		name := strings.TrimSpace(content)
+		if len(name) < 2 {
+			retryText := "Por favor, digite seu nome completo para prosseguirmos com seu atendimento:"
+			s.SendMessageToChannel(conv, retryText)
+			s.saveSystemMessage(conv.ID, retryText)
+			return nil
+		}
+
+		conv.ClientName = name
+		conv.ContactName = name
+		conv.BotStep = "menu_unregistered"
+		conv.UpdatedAt = now
+		if s.db != nil {
+			_ = s.db.UpsertConversation(conv)
+		}
+		if s.chatService != nil {
+			s.chatService.UpsertMemoryConversation(conv)
+		}
+
+		menuText := fmt.Sprintf("Prazer, *%s*! ☀️\n\nComo podemos te ajudar? Digite o número da opção desejada:\n\n1️⃣ - Contratar Planos de Fibra Óptica\n2️⃣ - Digitar outro CPF/CNPJ\n0️⃣ - Falar com um Atendente", name)
+		s.SendMessageToChannel(conv, menuText)
+		s.saveSystemMessage(conv.ID, menuText)
+		s.notifyOperatorsConversationUpdated(conv)
+		return nil
+
+	case "menu":
+		opt := strings.TrimSpace(content)
+		lower := strings.ToLower(opt)
+
+		if opt == "0" || strings.Contains(lower, "atendente") || strings.Contains(lower, "humano") || strings.Contains(lower, "falar") {
+			conv.Status = models.ConvWaiting
+			conv.BotStep = ""
+			conv.Department = "Atendimento Geral"
+			conv.UpdatedAt = now
+			if s.db != nil {
+				_ = s.db.UpsertConversation(conv)
+			}
+			if s.chatService != nil {
+				s.chatService.UpsertMemoryConversation(conv)
+			}
+
+			transferText := "Transferindo você para a nossa fila de atendimento. Por favor aguarde, logo um atendente responderá por aqui! ⏳"
+			s.SendMessageToChannel(conv, transferText)
+			s.saveSystemMessage(conv.ID, transferText)
+			s.notifyOperatorsConversationUpdated(conv)
+			return nil
+		}
+
+		if opt == "1" || strings.Contains(lower, "fatura") || strings.Contains(lower, "boleto") || strings.Contains(lower, "pix") || strings.Contains(lower, "segunda via") || strings.Contains(lower, "2 via") {
+			if s.rbxService != nil && conv.CpfCnpj != "" {
+				finSummary, err := s.rbxService.GetClientFinancial(context.Background(), "", conv.CpfCnpj)
+				if err == nil && finSummary != nil && len(finSummary.Documents) > 0 {
+					var buf strings.Builder
+					buf.WriteString("📄 *Faturas localizadas no seu cadastro:*\n\n")
+					for i, doc := range finSummary.Documents {
+						if i >= 3 {
+							break
+						}
+						statusIcon := "⏳"
+						if doc.Status == "vencido" {
+							statusIcon = "⚠️"
+						}
+						buf.WriteString(fmt.Sprintf("%s *Fatura %s*\nVencimento: %s | Valor: R$ %.2f\nStatus: %s\n", statusIcon, doc.DocumentNumber, doc.DueDate, doc.Value, strings.ToUpper(doc.Status)))
+						if doc.PixCopiaCola != "" {
+							buf.WriteString(fmt.Sprintf("🔑 *PIX Copia e Cola:*\n```%s```\n", doc.PixCopiaCola))
+						}
+						if doc.BoletoLink != "" {
+							buf.WriteString(fmt.Sprintf("🔗 *Boleto (PDF):*\n%s\n", doc.BoletoLink))
+						}
+						buf.WriteString("\n")
+					}
+					buf.WriteString("Digite *0* a qualquer momento para falar com um atendente.")
+					replyText := buf.String()
+					s.SendMessageToChannel(conv, replyText)
+					s.saveSystemMessage(conv.ID, replyText)
+					return nil
+				}
+			}
+
+			replyText := "Não identificamos faturas em aberto no momento para o seu cadastro! 🎉\n\nCaso precise de suporte ou outro assunto, digite *0* para falar com um atendente."
+			s.SendMessageToChannel(conv, replyText)
+			s.saveSystemMessage(conv.ID, replyText)
+			return nil
+		}
+
+		if opt == "2" || strings.Contains(lower, "suporte") || strings.Contains(lower, "conexao") || strings.Contains(lower, "conexão") || strings.Contains(lower, "internet") || strings.Contains(lower, "lenta") {
+			conv.Department = "Suporte Técnico"
+			conv.Status = models.ConvWaiting
+			conv.BotStep = ""
+			conv.UpdatedAt = now
+			if s.db != nil {
+				_ = s.db.UpsertConversation(conv)
+			}
+			if s.chatService != nil {
+				s.chatService.UpsertMemoryConversation(conv)
+			}
+
+			transferText := "Transferindo você para o setor de *Suporte Técnico*. Nossos especialistas já foram notificados e vão te atender em instantes!"
+			s.SendMessageToChannel(conv, transferText)
+			s.saveSystemMessage(conv.ID, transferText)
+			s.notifyOperatorsConversationUpdated(conv)
+			return nil
+		}
+
+		if opt == "3" || strings.Contains(lower, "plano") || strings.Contains(lower, "comercial") || strings.Contains(lower, "contratar") || strings.Contains(lower, "velocidade") {
+			conv.Department = "Comercial"
+			conv.Status = models.ConvWaiting
+			conv.BotStep = ""
+			conv.UpdatedAt = now
+			if s.db != nil {
+				_ = s.db.UpsertConversation(conv)
+			}
+			if s.chatService != nil {
+				s.chatService.UpsertMemoryConversation(conv)
+			}
+
+			transferText := "Transferindo você para o setor *Comercial*. Nossos consultores irão te apresentar os melhores planos para sua residência!"
+			s.SendMessageToChannel(conv, transferText)
+			s.saveSystemMessage(conv.ID, transferText)
+			s.notifyOperatorsConversationUpdated(conv)
+			return nil
+		}
+
+		// Opção não reconhecida
+		reminderText := "Opção não reconhecida. Por favor, digite o número da opção desejada:\n\n1 - 2ª Via de Fatura / PIX\n2 - Suporte Técnico\n3 - Planos e Contratação\n0 - Falar com Atendente"
+		s.SendMessageToChannel(conv, reminderText)
+		s.saveSystemMessage(conv.ID, reminderText)
+		return nil
+
+	case "menu_unregistered":
+		opt := strings.TrimSpace(content)
+		lower := strings.ToLower(opt)
+
+		if opt == "0" || strings.Contains(lower, "atendente") || strings.Contains(lower, "humano") || strings.Contains(lower, "falar") {
+			conv.Status = models.ConvWaiting
+			conv.BotStep = ""
+			conv.Department = "Atendimento Geral"
+			conv.UpdatedAt = now
+			if s.db != nil {
+				_ = s.db.UpsertConversation(conv)
+			}
+			if s.chatService != nil {
+				s.chatService.UpsertMemoryConversation(conv)
+			}
+
+			transferText := "Transferindo você para a nossa fila de atendimento. Logo um consultor irá responder por aqui!"
+			s.SendMessageToChannel(conv, transferText)
+			s.saveSystemMessage(conv.ID, transferText)
+			s.notifyOperatorsConversationUpdated(conv)
+			return nil
+		}
+
+		if opt == "1" || strings.Contains(lower, "contratar") || strings.Contains(lower, "plano") || strings.Contains(lower, "fibra") {
+			conv.Department = "Comercial"
+			conv.Status = models.ConvWaiting
+			conv.BotStep = ""
+			conv.UpdatedAt = now
+			if s.db != nil {
+				_ = s.db.UpsertConversation(conv)
+			}
+			if s.chatService != nil {
+				s.chatService.UpsertMemoryConversation(conv)
+			}
+
+			transferText := "Excelente! Estamos transferindo você para nossa equipe *Comercial* para verificar a viabilidade da Fibra Óptica SOL no seu endereço!"
+			s.SendMessageToChannel(conv, transferText)
+			s.saveSystemMessage(conv.ID, transferText)
+			s.notifyOperatorsConversationUpdated(conv)
+			return nil
+		}
+
+		if opt == "2" || strings.Contains(lower, "outro cpf") || strings.Contains(lower, "outro") || strings.Contains(lower, "tentar") {
+			conv.BotStep = "awaiting_doc"
+			conv.UpdatedAt = now
+			if s.db != nil {
+				_ = s.db.UpsertConversation(conv)
+			}
+			if s.chatService != nil {
+				s.chatService.UpsertMemoryConversation(conv)
+			}
+
+			promptText := "Por favor, digite o CPF ou CNPJ do titular da conta (apenas números):"
+			s.SendMessageToChannel(conv, promptText)
+			s.saveSystemMessage(conv.ID, promptText)
+			s.notifyOperatorsConversationUpdated(conv)
+			return nil
+		}
+
+		reminderText := "Opção não reconhecida. Por favor, digite o número da opção desejada:\n\n1 - Contratar Planos de Fibra Óptica\n2 - Digitar outro CPF/CNPJ\n0 - Falar com Atendente"
+		s.SendMessageToChannel(conv, reminderText)
+		s.saveSystemMessage(conv.ID, reminderText)
+		return nil
+	}
+
+	return nil
+}
+
+// Helpers para envio de mensagens de sistema e notificações WebSocket
+func (s *ChannelService) saveSystemMessage(conversationID, content string) *models.Message {
+	now := time.Now().UTC()
+	msg := &models.Message{
+		ID:             "sys-bot-" + uuid.New().String()[:8],
+		ConversationID: conversationID,
+		SenderID:       "system",
+		SenderType:     models.SenderSystem,
+		SenderName:     "Sistema SOL",
+		Content:        content,
+		Timestamp:      now.Format(time.RFC3339),
+		Status:         models.StatusDelivered,
+	}
+	if s.chatService != nil {
+		_ = s.chatService.SaveMessage(msg)
+	}
+
+	s.mu.RLock()
+	hub := s.hub
+	s.mu.RUnlock()
+	if hub != nil {
+		hub.BroadcastToOperators(&models.WSAction{
+			Type:    "message",
+			Payload: msg,
+		}, conversationID)
+		hub.BroadcastToConversation(conversationID, &models.WSAction{
+			Type:    "message",
+			Payload: msg,
+		})
+	}
+	return msg
+}
+
+func (s *ChannelService) notifyOperatorsMessage(conversationID string, msg *models.Message) {
+	s.mu.RLock()
+	hub := s.hub
+	s.mu.RUnlock()
+	if hub != nil {
+		hub.BroadcastToOperators(&models.WSAction{
+			Type:    "message",
+			Payload: msg,
+		}, conversationID)
+		hub.BroadcastToConversation(conversationID, &models.WSAction{
+			Type:    "message",
+			Payload: msg,
+		})
+	}
+}
+
+func (s *ChannelService) notifyOperatorsNewChat(conv *models.Conversation, firstMsg *models.Message) {
+	s.mu.RLock()
+	hub := s.hub
+	s.mu.RUnlock()
+	if hub != nil {
+		actionType := "conversation_updated"
+		if conv.Status == models.ConvWaiting {
+			actionType = "new_chat_waiting"
+		}
+		hub.BroadcastToOperators(&models.WSAction{
+			Type:    actionType,
+			Payload: conv,
+		})
+		if firstMsg != nil {
+			hub.BroadcastToOperators(&models.WSAction{
+				Type:    "message",
+				Payload: firstMsg,
+			}, conv.ID)
+			hub.BroadcastToConversation(conv.ID, &models.WSAction{
+				Type:    "message",
+				Payload: firstMsg,
+			})
+		}
+	}
+}
+
+func (s *ChannelService) notifyOperatorsConversationUpdated(conv *models.Conversation) {
+	s.mu.RLock()
+	hub := s.hub
+	s.mu.RUnlock()
+	if hub != nil {
+		hub.BroadcastToOperators(&models.WSAction{
+			Type:    "conversation_updated",
+			Payload: conv,
+		})
+		if conv.Status == models.ConvWaiting {
+			hub.BroadcastToOperators(&models.WSAction{
+				Type:    "new_chat_waiting",
+				Payload: conv,
+			})
+		}
+	}
+}
+
 // ProcessTelegramWebhook processa mensagens recebidas do Telegram
 func (s *ChannelService) ProcessTelegramWebhook(body []byte) error {
 	var update struct {
@@ -1102,87 +1672,9 @@ func (s *ChannelService) ProcessTelegramWebhook(body []byte) error {
 	if senderName == "" {
 		senderName = "Usuário Telegram"
 	}
+	msgID := fmt.Sprintf("%d", update.Message.MessageID)
 
-	// 1. Procura conversa ativa deste cliente no canal telegram
-	var conv *models.Conversation
-	if s.db != nil {
-		conv, _ = s.db.GetActiveConversationByChannel("telegram", chatIDStr)
-	}
-
-	now := time.Now().UTC()
-
-	// 2. Se não existir conversa em andamento, abre novo atendimento
-	isNew := false
-	if conv == nil {
-		isNew = true
-		convID := "conv-tg-" + uuid.New().String()[:8]
-		conv = &models.Conversation{
-			ID:          convID,
-			ClientID:    "tg-" + chatIDStr,
-			ClientName:  senderName,
-			ContactName: senderName,
-			Department:  "Suporte Técnico",
-			Status:      models.ConvWaiting,
-			Channel:     "telegram",
-			ChannelID:   chatIDStr,
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if s.db != nil {
-			_ = s.db.UpsertConversation(conv)
-		}
-	} else {
-		conv.UpdatedAt = now
-		if s.db != nil {
-			_ = s.db.UpsertConversation(conv)
-		}
-	}
-
-	if s.chatService != nil {
-		s.chatService.UpsertMemoryConversation(conv)
-	}
-
-	// 3. Salva a mensagem recebida
-	msg := &models.Message{
-		ID:             fmt.Sprintf("msg-tg-%d", update.Message.MessageID),
-		ConversationID: conv.ID,
-		SenderID:       "tg-" + chatIDStr,
-		SenderType:     models.SenderClient,
-		SenderName:     senderName,
-		Content:        update.Message.Text,
-		Timestamp:      now.Format(time.RFC3339),
-		Status:         models.StatusDelivered,
-	}
-
-	if err := s.chatService.SaveMessage(msg); err != nil {
-		log.Printf("[TELEGRAM] Erro ao salvar mensagem: %v", err)
-		return err
-	}
-
-	// 4. Notifica operadores via WebSocket em tempo real
-	s.mu.RLock()
-	hub := s.hub
-	s.mu.RUnlock()
-
-	if hub != nil {
-		if isNew {
-			hub.BroadcastToOperators(&models.WSAction{
-				Type:    "new_chat_waiting",
-				Payload: conv,
-			})
-		}
-		hub.BroadcastToOperators(&models.WSAction{
-			Type:    "message",
-			Payload: msg,
-		})
-		hub.BroadcastToConversation(conv.ID, &models.WSAction{
-			Type:    "message",
-			Payload: msg,
-		})
-	}
-
-	log.Printf("📩 [TELEGRAM] Mensagem recebida de %s (%s): %s", senderName, chatIDStr, update.Message.Text)
-	return nil
+	return s.ProcessIncomingChannelMessage("telegram", chatIDStr, senderName, update.Message.Text, msgID)
 }
 
 // ProcessEvolutionWebhook processa mensagens recebidas do Evolution API (WhatsApp Não Oficial)
@@ -1251,151 +1743,12 @@ func (s *ChannelService) ProcessEvolutionWebhook(body []byte) error {
 		pushName = "WhatsApp " + number
 	}
 
-	// 1. Procura conversa ativa deste número no canal whatsapp_evolution
-	var conv *models.Conversation
-	if s.db != nil {
-		conv, _ = s.db.GetActiveConversationByChannel("whatsapp_evolution", number)
-	}
-
-	now := time.Now().UTC()
-
-	// 1.1 Se a conversa estiver aguardando avaliação (CSAT), processa a nota de 1 a 5
-	if conv != nil && conv.Status == models.ConvWaitingRating {
-		rating := ParseRatingNumber(content)
-		if rating >= 1 && rating <= 5 {
-			log.Printf("⭐ [CSAT EVOLUTION] Cliente %s (%s) avaliou atendimento %s com nota %d", pushName, number, conv.ID, rating)
-
-			clientRatingMsg := &models.Message{
-				ID:             "msg-wapp-rate-" + uuid.New().String()[:8],
-				ConversationID: conv.ID,
-				SenderID:       "wapp-" + number,
-				SenderType:     models.SenderClient,
-				SenderName:     pushName,
-				Content:        content,
-				Timestamp:      now.Format(time.RFC3339),
-				Status:         models.StatusDelivered,
-			}
-			_ = s.chatService.SaveMessage(clientRatingMsg)
-
-			_, _ = s.chatService.RateConversation(conv.ID, rating, content)
-
-			thankYouText := fmt.Sprintf("Agradecemos pela sua avaliação (Nota %d)! ⭐\nSua opinião nos ajuda a melhorar cada vez mais.\n\nAtendimento finalizado com sucesso. Tenha um excelente dia!", rating)
-			s.SendMessageToChannel(conv, thankYouText)
-
-			sysThankMsg := &models.Message{
-				ID:             "sys-thank-" + uuid.New().String()[:8],
-				ConversationID: conv.ID,
-				SenderID:       "system",
-				SenderType:     models.SenderSystem,
-				SenderName:     "Sistema SOL",
-				Content:        thankYouText,
-				Timestamp:      now.Format(time.RFC3339),
-				Status:         models.StatusDelivered,
-			}
-			_ = s.chatService.SaveMessage(sysThankMsg)
-
-			s.mu.RLock()
-			hub := s.hub
-			s.mu.RUnlock()
-			if hub != nil {
-				hub.BroadcastToOperators(&models.WSAction{
-					Type:    "conversation_updated",
-					Payload: conv,
-				})
-				hub.BroadcastToOperators(&models.WSAction{
-					Type:    "message",
-					Payload: clientRatingMsg,
-				})
-				hub.BroadcastToOperators(&models.WSAction{
-					Type:    "message",
-					Payload: sysThankMsg,
-				})
-			}
-			return nil
-		} else {
-			reminderText := "O atendimento já foi encerrado pelo atendente.\n\nPara registrar sua avaliação, por favor responda apenas com uma nota de 1 a 5 (onde 1 é Muito Ruim e 5 é Excelente)."
-			s.SendMessageToChannel(conv, reminderText)
-			return nil
-		}
-	}
-
-	isNew := false
-
-	if conv == nil {
-		isNew = true
-		convID := "conv-wapp-" + uuid.New().String()[:8]
-		conv = &models.Conversation{
-			ID:          convID,
-			ClientID:    "wapp-" + number,
-			ClientName:  pushName,
-			ContactName: pushName,
-			Department:  "Suporte Técnico",
-			Status:      models.ConvWaiting,
-			Channel:     "whatsapp_evolution",
-			ChannelID:   number,
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if s.db != nil {
-			_ = s.db.UpsertConversation(conv)
-		}
-	} else {
-		conv.UpdatedAt = now
-		if s.db != nil {
-			_ = s.db.UpsertConversation(conv)
-		}
-	}
-
-	if s.chatService != nil {
-		s.chatService.UpsertMemoryConversation(conv)
-	}
-
-	// 2. Salva a mensagem recebida
-	msgID := "msg-wapp-" + uuid.New().String()[:8]
+	msgID := ""
 	if idStr, ok := key["id"].(string); ok && idStr != "" {
-		msgID = "wapp-" + idStr
+		msgID = idStr
 	}
 
-	msg := &models.Message{
-		ID:             msgID,
-		ConversationID: conv.ID,
-		SenderID:       "wapp-" + number,
-		SenderType:     models.SenderClient,
-		SenderName:     pushName,
-		Content:        content,
-		Timestamp:      now.Format(time.RFC3339),
-		Status:         models.StatusDelivered,
-	}
-
-	if err := s.chatService.SaveMessage(msg); err != nil {
-		log.Printf("[EVOLUTION] Erro ao salvar mensagem: %v", err)
-		return err
-	}
-
-	// 3. Notifica operadores via WebSocket em tempo real
-	s.mu.RLock()
-	hub := s.hub
-	s.mu.RUnlock()
-
-	if hub != nil {
-		if isNew {
-			hub.BroadcastToOperators(&models.WSAction{
-				Type:    "new_chat_waiting",
-				Payload: conv,
-			})
-		}
-		hub.BroadcastToOperators(&models.WSAction{
-			Type:    "message",
-			Payload: msg,
-		})
-		hub.BroadcastToConversation(conv.ID, &models.WSAction{
-			Type:    "message",
-			Payload: msg,
-		})
-	}
-
-	log.Printf("📩 [EVOLUTION] Mensagem recebida de %s (%s): %s", pushName, number, content)
-	return nil
+	return s.ProcessIncomingChannelMessage("whatsapp_evolution", number, pushName, content, msgID)
 }
 
 // ProcessWhatsAppOfficialWebhook processa mensagens recebidas da Meta Cloud API
@@ -1508,143 +1861,88 @@ func (s *ChannelService) ProcessWhatsAppOfficialWebhook(body []byte) error {
 					continue
 				}
 
-				number := m.From
-				var conv *models.Conversation
-				if s.db != nil {
-					conv, _ = s.db.GetActiveConversationByChannel("whatsapp_official", number)
-				}
-
-				now := time.Now().UTC()
-
-				// Se a conversa estiver aguardando avaliação (CSAT), processa a nota de 1 a 5
-				if conv != nil && conv.Status == models.ConvWaitingRating {
-					rating := ParseRatingNumber(content)
-					if rating >= 1 && rating <= 5 {
-						log.Printf("⭐ [CSAT OFICIAL] Cliente %s (%s) avaliou atendimento %s com nota %d", contactName, number, conv.ID, rating)
-
-						clientRatingMsg := &models.Message{
-							ID:             "msg-waoff-rate-" + uuid.New().String()[:8],
-							ConversationID: conv.ID,
-							SenderID:       "waoff-" + number,
-							SenderType:     models.SenderClient,
-							SenderName:     contactName,
-							Content:        content,
-							Timestamp:      now.Format(time.RFC3339),
-							Status:         models.StatusDelivered,
-						}
-						_ = s.chatService.SaveMessage(clientRatingMsg)
-
-						_, _ = s.chatService.RateConversation(conv.ID, rating, content)
-
-						thankYouText := fmt.Sprintf("Agradecemos pela sua avaliação (Nota %d)! ⭐\nSua opinião nos ajuda a melhorar cada vez mais.\n\nAtendimento finalizado com sucesso. Tenha um excelente dia!", rating)
-						s.SendMessageToChannel(conv, thankYouText)
-
-						sysThankMsg := &models.Message{
-							ID:             "sys-thank-" + uuid.New().String()[:8],
-							ConversationID: conv.ID,
-							SenderID:       "system",
-							SenderType:     models.SenderSystem,
-							SenderName:     "Sistema SOL",
-							Content:        thankYouText,
-							Timestamp:      now.Format(time.RFC3339),
-							Status:         models.StatusDelivered,
-						}
-						_ = s.chatService.SaveMessage(sysThankMsg)
-
-						s.mu.RLock()
-						hub := s.hub
-						s.mu.RUnlock()
-						if hub != nil {
-							hub.BroadcastToOperators(&models.WSAction{
-								Type:    "conversation_updated",
-								Payload: conv,
-							})
-							hub.BroadcastToOperators(&models.WSAction{
-								Type:    "message",
-								Payload: clientRatingMsg,
-							})
-							hub.BroadcastToOperators(&models.WSAction{
-								Type:    "message",
-								Payload: sysThankMsg,
-							})
-						}
-						continue
-					} else {
-						reminderText := "O atendimento já foi encerrado pelo atendente.\n\nPara registrar sua avaliação, por favor responda apenas com uma nota de 1 a 5 (onde 1 é Muito Ruim e 5 é Excelente)."
-						s.SendMessageToChannel(conv, reminderText)
-						continue
-					}
-				}
-
-				isNew := false
-
-				if conv == nil {
-					isNew = true
-					convID := "conv-waoff-" + uuid.New().String()[:8]
-					conv = &models.Conversation{
-						ID:          convID,
-						ClientID:    "waoff-" + number,
-						ClientName:  contactName,
-						ContactName: contactName,
-						Department:  "Suporte Técnico",
-						Status:      models.ConvWaiting,
-						Channel:     "whatsapp_official",
-						ChannelID:   number,
-						CreatedAt:   now,
-						UpdatedAt:   now,
-					}
-					if s.db != nil {
-						_ = s.db.UpsertConversation(conv)
-					}
-				} else {
-					conv.UpdatedAt = now
-					if s.db != nil {
-						_ = s.db.UpsertConversation(conv)
-					}
-				}
-
-				if s.chatService != nil {
-					s.chatService.UpsertMemoryConversation(conv)
-				}
-
-				msg := &models.Message{
-					ID:             "waoff-" + m.ID,
-					ConversationID: conv.ID,
-					SenderID:       "waoff-" + number,
-					SenderType:     models.SenderClient,
-					SenderName:     contactName,
-					Content:        m.Text.Body,
-					Timestamp:      now.Format(time.RFC3339),
-					Status:         models.StatusDelivered,
-				}
-
-				_ = s.chatService.SaveMessage(msg)
-
-				s.mu.RLock()
-				hub := s.hub
-				s.mu.RUnlock()
-
-				if hub != nil {
-					if isNew {
-						hub.BroadcastToOperators(&models.WSAction{
-							Type:    "new_chat_waiting",
-							Payload: conv,
-						})
-					}
-					hub.BroadcastToOperators(&models.WSAction{
-						Type:    "message",
-						Payload: msg,
-					})
-					hub.BroadcastToConversation(conv.ID, &models.WSAction{
-						Type:    "message",
-						Payload: msg,
-					})
-				}
-
-				log.Printf("📩 [WHATSAPP OFICIAL] Mensagem recebida de %s (%s): %s", contactName, number, m.Text.Body)
+				_ = s.ProcessIncomingChannelMessage("whatsapp_official", m.From, contactName, content, m.ID)
 			}
 		}
 	}
 
 	return nil
+}
+
+// ==========================================
+// WORKER DE INATIVIDADE NO CHATBOT (TIMEOUT)
+// ==========================================
+
+// StartBotTimeoutWorker monitora em background atendimentos que ficaram travados no bot sem selecionar setor
+func (s *ChannelService) StartBotTimeoutWorker(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	log.Println("🤖 [Bot Timeout Worker] Worker de monitoramento de inatividade iniciado (intervalo: 30s)")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("🛑 [Bot Timeout Worker] Worker finalizado")
+			return
+		case <-ticker.C:
+			s.checkAndTransferAbandonedBots()
+		}
+	}
+}
+
+func (s *ChannelService) checkAndTransferAbandonedBots() {
+	if s.db == nil {
+		return
+	}
+
+	settings, err := s.db.GetChatSettings()
+	if err != nil || settings == nil {
+		return
+	}
+
+	timeoutMinutes := settings.BotTimeoutMinutes
+	if timeoutMinutes <= 0 {
+		timeoutMinutes = 3
+	}
+
+	fallbackDept := strings.TrimSpace(settings.BotFallbackDept)
+	if fallbackDept == "" {
+		fallbackDept = "Suporte Técnico"
+	}
+
+	cutoff := time.Now().UTC().Add(-time.Duration(timeoutMinutes) * time.Minute)
+	abandoned, err := s.db.GetAbandonedBotConversations(cutoff)
+	if err != nil {
+		log.Printf("⚠️ [Bot Timeout Worker] Erro ao buscar atendimentos inativos: %v", err)
+		return
+	}
+
+	if len(abandoned) == 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	for _, conv := range abandoned {
+		conv.Status = models.ConvWaiting
+		conv.Department = fallbackDept
+		conv.BotStep = ""
+		conv.UpdatedAt = now
+
+		if s.db != nil {
+			_ = s.db.UpsertConversation(conv)
+		}
+		if s.chatService != nil {
+			s.chatService.UpsertMemoryConversation(conv)
+		}
+
+		transferMsg := fmt.Sprintf("Como você não selecionou uma opção, transferimos você automaticamente para a fila do setor de *%s*. Nossos atendentes irão te responder em instantes! ⏳", fallbackDept)
+		s.SendMessageToChannel(conv, transferMsg)
+		s.saveSystemMessage(conv.ID, transferMsg)
+
+		// Notifica operadores - conv.Status agora é ConvWaiting, então emitirá new_chat_waiting com som de fila!
+		s.notifyOperatorsConversationUpdated(conv)
+
+		log.Printf("⏱️ [Bot Timeout] Atendimento %s (%s) transferido automaticamente para '%s' por inatividade (%d min)", conv.ID, conv.ClientName, fallbackDept, timeoutMinutes)
+	}
 }

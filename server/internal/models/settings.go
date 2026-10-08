@@ -33,4 +33,8 @@ type ChatSettings struct {
 	ChatbotFlow          *FlowNode `json:"chatbotFlow"`
 	AIEnabled            bool      `json:"aiEnabled"`
 	AIPrompt             string    `json:"aiPrompt"`
+
+	// Inatividade e Transbordo no Chatbot
+	BotTimeoutMinutes int    `json:"botTimeoutMinutes"` // Minutos máximos no bot sem selecionar setor (padrão: 3)
+	BotFallbackDept   string `json:"botFallbackDept"`   // Setor destino caso o cliente não selecione (padrão: "Suporte Técnico")
 }

@@ -197,6 +197,10 @@ func (db *DB) runMigrations() error {
 	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_id VARCHAR(100) DEFAULT '';
 	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_meta TEXT DEFAULT '';
 
+	-- Migrações incrementais para Chatbot e Fluxo de Identificação
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS bot_step VARCHAR(64) DEFAULT '';
+	ALTER TABLE conversations ADD COLUMN IF NOT EXISTS bot_node_id VARCHAR(64) DEFAULT '';
+
 	CREATE INDEX IF NOT EXISTS idx_conversations_operator ON conversations(operator_id);
 	CREATE INDEX IF NOT EXISTS idx_conversations_dept ON conversations(department);
 	CREATE INDEX IF NOT EXISTS idx_conversations_rating ON conversations(rating);
@@ -415,6 +419,8 @@ func DefaultSettings() *models.ChatSettings {
 		EnableBotFlow:        true,
 		AIEnabled:            false,
 		AIPrompt:             "Você é o assistente virtual inteligente da SOL CRM. Seja gentil, objetivo e ajude o cliente com dúvidas sobre serviços, faturas e suporte técnico.",
+		BotTimeoutMinutes:    3,
+		BotFallbackDept:      "Suporte Técnico",
 		ChatbotFlow: &models.FlowNode{
 			ID:      "root",
 			Title:   "Mensagem Inicial",
@@ -636,6 +642,13 @@ func (db *DB) GetChatSettings() (*models.ChatSettings, error) {
 	var settings models.ChatSettings
 	if err := json.Unmarshal(rawJSON, &settings); err != nil {
 		return DefaultSettings(), nil
+	}
+
+	if settings.BotTimeoutMinutes <= 0 {
+		settings.BotTimeoutMinutes = 3
+	}
+	if strings.TrimSpace(settings.BotFallbackDept) == "" {
+		settings.BotFallbackDept = "Suporte Técnico"
 	}
 
 	return &settings, nil
@@ -1136,6 +1149,7 @@ func scanConversationRow(scanner interface{ Scan(dest ...any) error }) (*models.
 	var conv models.Conversation
 	var opID, opName, statusStr string
 	var rbxGroup, closedBy, closeReason, ratingComment, channel, channelID, channelMeta sql.NullString
+	var botStep, botNodeID sql.NullString
 	var assignedAt, closedAt, ratedAt sql.NullTime
 	var rating sql.NullInt32
 
@@ -1145,6 +1159,7 @@ func scanConversationRow(scanner interface{ Scan(dest ...any) error }) (*models.
 		&conv.CreatedAt, &conv.UpdatedAt,
 		&assignedAt, &closedAt, &closedBy, &closeReason, &rating, &ratingComment, &ratedAt,
 		&channel, &channelID, &channelMeta,
+		&botStep, &botNodeID,
 	)
 	if err != nil {
 		return nil, err
@@ -1192,6 +1207,12 @@ func scanConversationRow(scanner interface{ Scan(dest ...any) error }) (*models.
 	if channelMeta.Valid {
 		conv.ChannelMeta = channelMeta.String
 	}
+	if botStep.Valid {
+		conv.BotStep = botStep.String
+	}
+	if botNodeID.Valid {
+		conv.BotNodeID = botNodeID.String
+	}
 
 	return &conv, nil
 }
@@ -1216,12 +1237,12 @@ func (db *DB) UpsertConversation(conv *models.Conversation) error {
 		id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
 		operator_id, operator_name, olt, pon, cto, created_at, updated_at,
 		assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
-		channel, channel_id, channel_meta
+		channel, channel_id, channel_meta, bot_step, bot_node_id
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8,
 		$9, $10, $11, $12, $13, $14, $15,
 		$16, $17, $18, $19, $20, $21, $22,
-		$23, $24, $25
+		$23, $24, $25, $26, $27
 	)
 	ON CONFLICT (id) DO UPDATE SET
 		client_name = EXCLUDED.client_name,
@@ -1245,13 +1266,15 @@ func (db *DB) UpsertConversation(conv *models.Conversation) error {
 		channel = CASE WHEN EXCLUDED.channel != '' AND EXCLUDED.channel != 'mobile' THEN EXCLUDED.channel WHEN conversations.channel != '' THEN conversations.channel ELSE 'mobile' END,
 		channel_id = CASE WHEN EXCLUDED.channel_id != '' THEN EXCLUDED.channel_id ELSE conversations.channel_id END,
 		channel_meta = CASE WHEN EXCLUDED.channel_meta != '' THEN EXCLUDED.channel_meta ELSE conversations.channel_meta END,
+		bot_step = EXCLUDED.bot_step,
+		bot_node_id = EXCLUDED.bot_node_id,
 		updated_at = EXCLUDED.updated_at;
 	`
 	_, err := db.Exec(query,
 		conv.ID, conv.ClientID, conv.ClientName, conv.ContactName, conv.CpfCnpj, conv.Department, conv.RbxGroup, string(conv.Status),
 		opID, opName, conv.OLT, conv.PON, conv.CTO, conv.CreatedAt, conv.UpdatedAt,
 		conv.AssignedAt, conv.ClosedAt, conv.ClosedBy, conv.CloseReason, conv.Rating, conv.RatingComment, conv.RatedAt,
-		ch, conv.ChannelID, conv.ChannelMeta,
+		ch, conv.ChannelID, conv.ChannelMeta, conv.BotStep, conv.BotNodeID,
 	)
 	return err
 }
@@ -1262,7 +1285,7 @@ func (db *DB) GetConversationByID(id string) (*models.Conversation, error) {
 	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
 	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
 	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
-	       channel, channel_id, channel_meta
+	       channel, channel_id, channel_meta, bot_step, bot_node_id
 	FROM conversations WHERE id = $1;
 	`
 	row := db.QueryRow(query, id)
@@ -1275,9 +1298,9 @@ func (db *DB) ListConversations(status models.ConversationStatus, cpfCnpj string
 	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
 	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
 	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
-	       channel, channel_id, channel_meta
+	       channel, channel_id, channel_meta, bot_step, bot_node_id
 	FROM conversations
-	WHERE ($1 = '' OR status = $1 OR ($1 = 'closed' AND status = 'waiting_rating'))
+	WHERE ($1 = '' OR status = $1 OR ($1 = 'closed' AND status = 'waiting_rating') OR ($1 = 'waiting' AND status = 'bot'))
 	  AND ($2 = '' OR cpf_cnpj = $2)
 	ORDER BY updated_at DESC;
 	`
@@ -1387,7 +1410,7 @@ func (db *DB) SearchConversations(filter models.SearchConversationsFilter) ([]*m
 	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
 	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
 	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
-	       channel, channel_id, channel_meta
+	       channel, channel_id, channel_meta, bot_step, bot_node_id
 	FROM conversations
 	WHERE %s
 	ORDER BY created_at DESC
@@ -1729,7 +1752,7 @@ func (db *DB) GetActiveConversationByChannel(channel, channelID string) (*models
 	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
 	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
 	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
-	       channel, channel_id, channel_meta
+	       channel, channel_id, channel_meta, bot_step, bot_node_id
 	FROM conversations
 	WHERE (($1 = false AND channel = $2 AND channel_id = $3 AND status != 'closed')
 	   OR ($1 = true AND (channel = 'whatsapp_evolution' OR channel = 'whatsapp_official')
@@ -1801,6 +1824,36 @@ func (db *DB) SaveChannelConfig(key string, data interface{}) error {
 	_, err = db.Exec(query, key, bytes)
 	return err
 }
+
+// GetAbandonedBotConversations busca atendimentos em status 'bot' que estão inativos há mais tempo que o cutoff
+func (db *DB) GetAbandonedBotConversations(cutoff time.Time) ([]*models.Conversation, error) {
+	query := `
+	SELECT id, client_id, client_name, contact_name, cpf_cnpj, department, rbx_group, status,
+	       operator_id, operator_name, olt, pon, cto, created_at, updated_at,
+	       assigned_at, closed_at, closed_by, close_reason, rating, rating_comment, rated_at,
+	       channel, channel_id, channel_meta, bot_step, bot_node_id
+	FROM conversations
+	WHERE status = 'bot' AND updated_at <= $1
+	ORDER BY updated_at ASC
+	LIMIT 50;
+	`
+	rows, err := db.Query(query, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]*models.Conversation, 0)
+	for rows.Next() {
+		conv, err := scanConversationRow(rows)
+		if err != nil {
+			continue
+		}
+		list = append(list, conv)
+	}
+	return list, nil
+}
+
 
 
 

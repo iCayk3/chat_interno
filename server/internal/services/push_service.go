@@ -127,9 +127,14 @@ func (s *PushService) SendCampaignPush(tokens []string, title, message string, d
 }
 
 // SendChatMessagePush envia notificação de nova mensagem no chat do operador para o cliente
-func (s *PushService) SendChatMessagePush(token, senderName, messageText, conversationID string) {
+func (s *PushService) SendChatMessagePush(token, senderName, messageText, conversationID string, messageID ...string) {
 	title := fmt.Sprintf("SOL Atendimento - %s", senderName)
+	msgID := ""
+	if len(messageID) > 0 {
+		msgID = messageID[0]
+	}
 	data := map[string]interface{}{
+		"id":             msgID,
 		"type":           "chat_message",
 		"conversationId": conversationID,
 		"senderName":     senderName,

@@ -44,6 +44,7 @@ const (
 	ConvActive        ConversationStatus = "active"
 	ConvClosed        ConversationStatus = "closed"
 	ConvWaitingRating ConversationStatus = "waiting_rating"
+	ConvBot           ConversationStatus = "bot"
 )
 
 // OperatorInfo dados públicos do operador que atende
@@ -75,6 +76,10 @@ type Conversation struct {
 	Rating        *int               `json:"rating,omitempty"`
 	RatingComment string             `json:"ratingComment,omitempty"`
 	RatedAt       *time.Time         `json:"ratedAt,omitempty"`
+
+	// Etapa do Chatbot / Fluxo de Identificação
+	BotStep   string `json:"botStep,omitempty"`   // "awaiting_doc", "awaiting_name", "menu", "menu_unregistered"
+	BotNodeID string `json:"botNodeId,omitempty"` // ID do nó do fluxo do chatbot
 
 	// Canal de entrada Omnichannel
 	Channel     string `json:"channel,omitempty"`     // "mobile", "web", "telegram", "whatsapp_official", "whatsapp_evolution"

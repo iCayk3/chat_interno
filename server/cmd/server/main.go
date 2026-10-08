@@ -45,13 +45,18 @@ func main() {
 	campaignService := services.NewCampaignService(db, rbxService)
 	networkService := services.NewNetworkService(db)
 	pushService := services.NewPushService()
-	channelService := services.NewChannelService(db, chatService)
+	channelService := services.NewChannelService(db, chatService, rbxService)
 
 	// 3. Inicializa e roda o Hub WebSocket
 	hub := websocket.NewHub(chatService)
 	go hub.Run()
 
 	channelService.SetHub(hub)
+
+	// Worker em background para monitorar inatividade no chatbot (timeout configurável com fallback de setor)
+	ctxBot, cancelBot := context.WithCancel(context.Background())
+	defer cancelBot()
+	go channelService.StartBotTimeoutWorker(ctxBot)
 
 	// 4. Inicializa handlers e limitadores
 	h := handlers.NewHandler(chatService, extService, authService, rbxService, fileService, campaignService, networkService, pushService, channelService, db, hub, cfg.AllowedOrigins)

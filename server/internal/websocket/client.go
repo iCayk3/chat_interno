@@ -177,12 +177,12 @@ func (c *Client) handleAction(action *models.WSAction) {
 			Payload: msg,
 		}, c)
 
-		// Notifica operadores para atualizar chat e lista lateral em tempo real
+		// Notifica operadores para atualizar chat e lista lateral em tempo real (excluindo os que já receberam na sala)
 		if c.SenderType == models.SenderClient {
 			c.Hub.BroadcastToOperators(&models.WSAction{
 				Type:    "message",
 				Payload: msg,
-			})
+			}, targetConvID)
 		} else if c.SenderType == models.SenderOperator {
 			// Despacha a mensagem para canais externos (Telegram, WhatsApp Oficial, WhatsApp Evolution)
 			if conv, err := c.ChatService.GetConversation(targetConvID); err == nil && conv != nil {
@@ -194,7 +194,7 @@ func (c *Client) handleAction(action *models.WSAction) {
 				if c.PushService != nil && c.CampaignService != nil && !c.Hub.HasClientInRoom(targetConvID) {
 					pushToken := c.CampaignService.GetPushTokenByCpfOrDevice(conv.CpfCnpj, conv.ClientID)
 					if pushToken != "" {
-						c.PushService.SendChatMessagePush(pushToken, c.SenderName, msg.Content, targetConvID)
+						c.PushService.SendChatMessagePush(pushToken, c.SenderName, msg.Content, targetConvID, msg.ID)
 					}
 				}
 			}

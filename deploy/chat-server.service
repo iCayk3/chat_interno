@@ -1,0 +1,20 @@
+[Unit]
+Description=SOL Telecom - Servidor de Chat & Atendimento (Go Server)
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=solchat
+Group=solchat
+WorkingDirectory=/opt/sol-chat
+ExecStart=/opt/sol-chat/server
+Restart=always
+RestartSec=5
+EnvironmentFile=-/opt/sol-chat/.env
+Environment=PORT=8080
+Environment=ENV=production
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

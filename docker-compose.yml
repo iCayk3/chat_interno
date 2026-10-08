@@ -1,16 +1,75 @@
+# ==============================================================================
+# Docker Compose: Stack Completa de Produção do Software de Chat & Atendimento
+# ==============================================================================
+
 services:
+  # 1. Banco de Dados Relacional PostgreSQL
   postgres:
-    image: postgres:17-alpine
+    image: postgres:16-alpine
     container_name: solcrm-postgres
     restart: always
     environment:
       POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres123}
       POSTGRES_DB: ${DB_NAME:-solcrm}
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - solcrm_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-solcrm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - solcrm_network
+
+  # 2. Servidor Backend em Go (API REST & WebSockets de Alta Performance)
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: solcrm-server
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PORT=8080
+      - ENV=production
+      - DATABASE_URL=postgres://${DB_USER:-postgres}:${DB_PASSWORD:-postgres123}@postgres:5432/${DB_NAME:-solcrm}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:-sol-crm-master-secret-key-2026-production}
+      - MASTER_LICENSE_SERVER_URL=${MASTER_LICENSE_SERVER_URL:-http://localhost:8090}
+      - TENANT_NAME=${TENANT_NAME:-Sol Telecom}
+      - TENANT_CNPJ=${TENANT_CNPJ:-}
+      - SERVER_PUBLIC_URL=${SERVER_PUBLIC_URL:-http://localhost:8080}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://localhost:80,http://localhost:5173,http://localhost:8080}
+      - RATE_LIMIT_RPS=60
+      - RATE_LIMIT_BURST=120
+    ports:
+      - "${API_PORT:-8080}:8080"
+    networks:
+      - solcrm_network
+
+  # 3. Painel Web do Operador (React + Nginx com Reverse Proxy e WebSockets)
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: solcrm-web
+    restart: always
+    depends_on:
+      - server
+    ports:
+      - "${WEB_PORT:-80}:80"
+    networks:
+      - solcrm_network
+
+networks:
+  solcrm_network:
+    name: solcrm_network
+    driver: bridge
 
 volumes:
   solcrm_postgres_data:
+    name: solcrm_postgres_data

@@ -29,26 +29,38 @@ Sistema de chat e atendimento interno em tempo real no modelo **Omnichannel / He
 ```text
 Chat-Interno/
 ├── AGENTS.md                  # Este arquivo de diretrizes para agentes de IA
-├── README.md                  # Documentação humana do projeto
-├── mobile/                    # App Mobile do Cliente (Expo + React Native)
-│   ├── src/
-│   │   ├── components/        # Componentes UI (ChatMessageItem, ChatInputBar, etc.)
-│   │   ├── screens/           # Telas (WelcomeScreen, ChatScreen)
-│   │   ├── services/          # chatSocket (WebSocket + Mock fallback), storage (AsyncStorage)
-│   │   ├── theme/             # Cores e estilos do app
-│   │   ├── types/             # Tipagens centrais de mensagens, clientes e sessões
-│   │   └── navigation/        # Stack de navegação (React Navigation)
-│   ├── App.tsx                # Ponto de entrada com SafeAreaProvider e Navigator
-│   └── app.json               # Configurações do Expo (ajustes de teclado resize)
-├── server/                    # Backend em Go (a ser implementado/expandido)
+├── README.md                  # Documentação completa de execução e arquitetura
+├── docker-compose.yml         # Stack Docker de produção do Servidor do Cliente
+├── install-linux.sh           # Instalador automatizado para VPS do Cliente (Linux básico)
+├── master/                    # Super Sistema Master (Control Plane Isolado do Proprietário)
+│   ├── server/                # Backend em Go do Master (API Chi, Engine de Licenças)
+│   ├── Dockerfile             # Container Docker do Master
+│   ├── docker-compose.yml     # Orquestração isolada do Master
+│   ├── install-linux.sh       # Instalador automatizado para VPS do Master
+│   ├── sol-master.service     # Serviço systemd do Master
+│   └── README.md              # Documentação exclusiva do Master
+├── server/                    # Servidor do Cliente (Backend Go de Atendimento & WebSocket Hub)
 │   ├── cmd/server/            # main.go
 │   ├── internal/
-│   │   ├── websocket/         # Hub, Client e gerenciador de conexões
+│   │   ├── websocket/         # Hub, Client e gerenciador de conexões em tempo real
 │   │   ├── handlers/          # Handlers REST e WebSocket
-│   │   ├── services/          # Lógica de negócio e integrações com APIs externas
+│   │   ├── services/          # Lógica de negócio, Licenciamento (auto-registro), ERPs, Mercado Pago
+│   │   ├── database/          # PostgreSQL migrations e consultas
 │   │   └── models/            # Structs Go alinhadas com as tipagens do mobile/web
+│   ├── Dockerfile             # Container Docker do Servidor do Cliente
 │   └── go.mod
-└── web/                       # Painel Web do Operador (a ser inicializado)
+├── web/                       # Painel Web do Operador (React + Vite + Tailwind CSS)
+│   ├── src/components/        # Fila de atendimento, CRM, Canais (Pareamento Mobile), Licença
+│   └── Dockerfile             # Container Web com Nginx
+├── mobile/                    # App Mobile do Cliente (Expo + React Native)
+│   ├── src/components/        # ChatMessageItem, ChatInputBar, ServerConfigModal
+│   ├── src/screens/           # WelcomeScreen, ChatScreen
+│   ├── src/services/          # chatSocket (WebSocket dinâmico + Mock fallback), storage
+│   ├── src/theme/             # Cores e estilos do app
+│   ├── src/types/             # Tipagens centrais de mensagens, clientes e sessões
+│   ├── App.tsx                # Ponto de entrada com SafeAreaProvider e deep linking
+│   └── app.json               # Configurações do Expo (ajustes de teclado resize e scheme)
+└── deploy/                    # Configurações de infraestrutura (Nginx e Systemd)
 ```
 
 ---
@@ -95,6 +107,11 @@ interface Message {
 4. **Qualidade de Código:**
    - Antes de concluir qualquer tarefa mobile, execute `npx tsc --noEmit` dentro da pasta `mobile/` para garantir **zero erros de TypeScript**.
    - No backend em Go, execute `go vet ./...` e garanta que não há goroutine leaks.
+5. **Desacoplamento Master vs Servidor do Cliente & Auto-Registro:**
+   - O Master (`master/`) é completamente isolado, com painel web embutido no binário Go e armazenamento independente.
+   - O Servidor do Cliente (`server/`) auto-registra novas instalações via `POST /api/v1/licenses/auto-register` no boot, recebendo uma licença Trial oficial de 30 dias sem necessidade de digitação manual de chaves.
+   - O Servidor do Cliente executa heartbeat periódico (a cada 5 segundos) no Master; bloqueios de sistema e alterações de Modo de Operação (`native`, `erp`, `hybrid`) disparados pelo Master são aplicados imediatamente em tempo real para os operadores via WebSocket.
+   - **Duplo Mercado Pago:** O Master possui credenciais exclusivas do proprietário para receber assinaturas com liberação automática via Webhook; cada servidor de cliente possui credenciais próprias para receber pagamentos de seus respectivos clientes finais.
 
 ---
 

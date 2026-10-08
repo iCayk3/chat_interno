@@ -40,3 +40,7 @@ Thumbs.db
 
 # Storage temporário de arquivos (ex: boletos com expiração de 1h)
 server/storage/
+
+# Arquivos de dados de tempo de execução (banco JSON do Master)
+*master_data.json
+*master_licenses.json

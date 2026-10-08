@@ -1,6 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import type { Conversation } from '../types/chat';
-import type { RBXClient, RBXFinancialSummary, RBXUnpaidDocument, NetworkOlt } from '../types/crm';
+import type {
+  RBXClient,
+  RBXFinancialSummary,
+  RBXUnpaidDocument,
+  NetworkOlt,
+  SystemSettings,
+  NativeCustomer,
+  NativeInvoice,
+} from '../types/crm';
 import { api } from '../services/api';
 import {
   DollarSign,
@@ -24,15 +32,24 @@ import {
 
 interface CustomerInfoSidebarProps {
   conversation: Conversation | null;
+  systemSettings?: SystemSettings | null;
   onSendPixToChat?: (pixCode: string) => void;
 }
 
 export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
   conversation,
+  systemSettings,
   onSendPixToChat,
 }) => {
+  const isNative = systemSettings?.operationMode === 'native';
+  const isHybrid = systemSettings?.operationMode === 'hybrid';
+  const isErp = !systemSettings || systemSettings.operationMode === 'erp';
+
   const [rbxClient, setRbxClient] = useState<RBXClient | null>(null);
   const [financial, setFinancial] = useState<RBXFinancialSummary | null>(null);
+  const [nativeCustomer, setNativeCustomer] = useState<NativeCustomer | null>(null);
+  const [nativeInvoices, setNativeInvoices] = useState<NativeInvoice[]>([]);
+  const [copiedNativePixId, setCopiedNativePixId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copiedPixId, setCopiedPixId] = useState<number | null>(null);
   const [promessaSuccessMsg, setPromessaSuccessMsg] = useState<string | null>(null);
@@ -65,10 +82,45 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
     api.getNetworkTree().then(setNetworkTree).catch(() => {});
   }, []);
 
-  // Busca dados no ERP RBX e sincroniza campos sempre que a conversa mudar
+  const loadData = async () => {
+    if (!conversation) return;
+    if (isNative) {
+      loadNativeData();
+    } else if (isHybrid) {
+      loadRbxData();
+      loadNativeData();
+    } else {
+      loadRbxData();
+    }
+  };
+
+  const loadNativeData = async () => {
+    if (!conversation) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const searchKey = conversation.cpfCnpj || conversation.clientName;
+      if (searchKey) {
+        const cust = await api.lookupNativeCustomer(searchKey);
+        setNativeCustomer(cust);
+        if (cust?.id) {
+          const invList = await api.getNativeInvoices({ customerId: cust.id });
+          setNativeInvoices(invList);
+        } else {
+          setNativeInvoices([]);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Native Customer Sidebar] Erro:', err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Busca dados no ERP RBX ou Nativo e sincroniza campos sempre que a conversa mudar
   useEffect(() => {
     if (conversation) {
-      loadRbxData();
+      loadData();
       setOlt(conversation.olt || '');
       setPon(conversation.pon || '');
       setCto(conversation.cto || '');
@@ -88,6 +140,8 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
     } else {
       setRbxClient(null);
       setFinancial(null);
+      setNativeCustomer(null);
+      setNativeInvoices([]);
       setOlt('');
       setPon('');
       setCto('');
@@ -100,6 +154,7 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
     conversation?.olt,
     conversation?.pon,
     conversation?.cto,
+    systemSettings?.operationMode,
   ]);
 
   // Ao selecionar uma CTO, busca automaticamente na árvore de rede a qual PON e OLT ela pertence
@@ -131,7 +186,7 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
     setIsSavingNetwork(true);
     setNetworkSuccessMsg(null);
     try {
-      const cleanDoc = (conversation.cpfCnpj || rbxClient?.cpfCnpj || '').replace(/\D/g, '');
+      const cleanDoc = (conversation.cpfCnpj || rbxClient?.cpfCnpj || nativeCustomer?.cpfCnpj || '').replace(/\D/g, '');
       await api.updateConversationNetwork(conversation.id, {
         olt: olt.trim(),
         pon: pon.trim(),
@@ -181,17 +236,53 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
       }
     } catch (err: any) {
       console.warn('[RBX Sidebar] Aviso ao consultar RBX:', err.message);
-      // Se falhar a busca por nome, tenta fallback genérico com identificador
-      try {
-        const client = await api.searchRbxCustomer('12345678901');
-        setRbxClient(client);
-        const fin = await api.getRbxFinancial(client.codigo, client.cpfCnpj);
-        setFinancial(fin);
-      } catch {
-        setError('Não foi possível obter dados do RBX no momento.');
+      if (isErp) {
+        try {
+          const client = await api.searchRbxCustomer('12345678901');
+          setRbxClient(client);
+          const fin = await api.getRbxFinancial(client.codigo, client.cpfCnpj);
+          setFinancial(fin);
+        } catch {
+          setError('Não foi possível obter dados do RBX no momento.');
+        }
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCopyNativePix = async (inv: NativeInvoice) => {
+    if (!inv.pixQrCode) {
+      alert('Código PIX não disponível nesta fatura.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(inv.pixQrCode);
+      setCopiedNativePixId(inv.id);
+      setTimeout(() => setCopiedNativePixId(null), 3000);
+      if (onSendPixToChat && conversation?.status === 'active') {
+        onSendPixToChat(inv.pixQrCode);
+      }
+    } catch {
+      alert('Não foi possível copiar o código PIX.');
+    }
+  };
+
+  const handleShowNativePixQrCode = (inv: NativeInvoice) => {
+    setPixQrCodeModalData({
+      docId: 0,
+      docHistoric: inv.description,
+      value: inv.amount,
+      pixCode: inv.pixQrCode || '',
+      qrCodeBase64: inv.pixQrCodeBase64 || '',
+    });
+  };
+
+  const handleOpenNativeBoleto = (inv: NativeInvoice) => {
+    if (inv.boletoUrl) {
+      window.open(inv.boletoUrl, '_blank');
+    } else {
+      alert('Link do boleto não disponível para esta fatura.');
     }
   };
 
@@ -306,23 +397,27 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
       {/* Header do Cliente */}
       <div className="flex items-center gap-3 pb-3 border-b border-slate-100">
         <div className="w-11 h-11 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold text-base shadow-xs shrink-0">
-          {(rbxClient?.nome || conversation.clientName).charAt(0).toUpperCase()}
+          {(rbxClient?.nome || nativeCustomer?.name || conversation.clientName).charAt(0).toUpperCase()}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <h3 className="font-bold text-slate-900 text-sm truncate">
-              {rbxClient?.nome || conversation.clientName}
+              {rbxClient?.nome || nativeCustomer?.name || conversation.clientName}
             </h3>
           </div>
           <p className="text-[11px] text-slate-500 font-mono truncate">
-            {rbxClient ? `RBX #${rbxClient.codigo} • ${rbxClient.cpfCnpj}` : conversation.clientId}
+            {rbxClient
+              ? `RBX #${rbxClient.codigo} • ${rbxClient.cpfCnpj}`
+              : nativeCustomer
+              ? `NATIVO • ${nativeCustomer.cpfCnpj}`
+              : conversation.clientId}
           </p>
         </div>
         <button
-          onClick={loadRbxData}
+          onClick={loadData}
           disabled={loading}
           className="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-100 transition-colors"
-          title="Recarregar dados no RBX"
+          title="Recarregar dados do cliente"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -336,7 +431,55 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
             <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-bold">Terceiro</span>
           </div>
           <div className="font-bold text-slate-800 text-sm">{conversation.contactName}</div>
-          <div className="text-[11px] text-slate-500">Falando em nome do titular cadastrado no RBX.</div>
+          <div className="text-[11px] text-slate-500">Falando em nome do titular cadastrado.</div>
+        </div>
+      )}
+
+      {/* Banner de Assinatura do Cliente Nativo */}
+      {nativeCustomer && !rbxClient && (
+        <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3 space-y-2 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-slate-500 font-medium">Status da Assinatura:</span>
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-bold text-[10px] ${
+                nativeCustomer.status === 'active'
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                  : nativeCustomer.status === 'blocked'
+                  ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                  : 'bg-rose-50 text-rose-700 border border-rose-200'
+              }`}
+            >
+              <Wifi className="w-3 h-3" />
+              {nativeCustomer.status === 'active'
+                ? 'ATIVO'
+                : nativeCustomer.status === 'blocked'
+                ? 'BLOQUEADO'
+                : 'CANCELADO'}
+            </span>
+          </div>
+
+          <div className="flex justify-between">
+            <span className="text-slate-500 font-medium">Plano Contratado:</span>
+            <span className="font-semibold text-slate-800 text-right truncate max-w-[150px]">
+              {nativeCustomer.planName || 'Personalizado'}
+            </span>
+          </div>
+
+          <div className="flex justify-between text-[11px] text-slate-500">
+            <span>Mensalidade / Vencimento:</span>
+            <span className="font-bold text-slate-800">
+              R$ {nativeCustomer.monthlyPrice.toFixed(2)} (Dia {nativeCustomer.dueDay})
+            </span>
+          </div>
+
+          {nativeCustomer.address && (
+            <div className="flex items-start gap-1.5 pt-1 border-t border-slate-200/60 text-[11px] text-slate-500">
+              <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+              <span className="leading-tight">
+                {nativeCustomer.address}, {nativeCustomer.number} - {nativeCustomer.neighborhood}, {nativeCustomer.city}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
@@ -534,58 +677,59 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
         </div>
       </div>
 
-      {/* Painel Financeiro do RBX Soft */}
-      <div className="space-y-2.5 text-xs">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5 font-bold text-slate-800 text-xs">
-            <DollarSign className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Financeiro (RBX ISP)</span>
+      {/* Painel Financeiro do RBX Soft (quando em modo ERP ou Híbrido com cliente no RBX) */}
+      {!isNative && (isErp || rbxClient) && (
+        <div className="space-y-2.5 text-xs">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 font-bold text-slate-800 text-xs">
+              <DollarSign className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Financeiro (RBX ISP)</span>
+            </div>
+            {financial && (
+              <span
+                className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
+                  financial.overdueCount > 0
+                    ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                    : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                }`}
+              >
+                {financial.overdueCount > 0
+                  ? `${financial.overdueCount} em atraso`
+                  : 'Adimplente'}
+              </span>
+            )}
           </div>
-          {financial && (
-            <span
-              className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
-                financial.overdueCount > 0
-                  ? 'bg-rose-50 text-rose-700 border border-rose-200'
-                  : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-              }`}
-            >
-              {financial.overdueCount > 0
-                ? `${financial.overdueCount} em atraso`
-                : 'Adimplente'}
-            </span>
-          )}
-        </div>
 
-        {financial && financial.documents.length > 0 ? (
-          <div className="space-y-2">
-            {financial.documents.map((doc) => {
-              const isOverdue = doc.status === 'vencido';
-              return (
-                <div
-                  key={doc.id}
-                  className={`p-3 rounded-xl border transition-all ${
-                    isOverdue
-                      ? 'bg-rose-50/40 border-rose-200 hover:border-rose-300'
-                      : 'bg-slate-50 border-slate-200 hover:border-blue-300'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-1">
-                    <div>
-                      <span className="font-bold text-slate-900 block truncate max-w-[160px]">
-                        {doc.historic}
-                      </span>
-                      <span className="text-[10px] text-slate-500 font-mono">
-                        Doc: #{doc.documentNumber} • Venc: {doc.dueDate}
+          {financial && financial.documents.length > 0 ? (
+            <div className="space-y-2">
+              {financial.documents.map((doc) => {
+                const isOverdue = doc.status === 'vencido';
+                return (
+                  <div
+                    key={doc.id}
+                    className={`p-3 rounded-xl border transition-all ${
+                      isOverdue
+                        ? 'bg-rose-50/40 border-rose-200 hover:border-rose-300'
+                        : 'bg-slate-50 border-slate-200 hover:border-blue-300'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-1">
+                      <div>
+                        <span className="font-bold text-slate-900 block truncate max-w-[160px]">
+                          {doc.historic}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          Doc: #{doc.documentNumber} • Venc: {doc.dueDate}
+                        </span>
+                      </div>
+                      <span
+                        className={`font-bold text-xs ${
+                          isOverdue ? 'text-rose-700' : 'text-slate-900'
+                        }`}
+                      >
+                        R$ {doc.value.toFixed(2)}
                       </span>
                     </div>
-                    <span
-                      className={`font-bold text-xs ${
-                        isOverdue ? 'text-rose-700' : 'text-slate-900'
-                      }`}
-                    >
-                      R$ {doc.value.toFixed(2)}
-                    </span>
-                  </div>
 
                     {/* Ações Rápidas do Atendente */}
                     <div className="mt-2.5 pt-2 border-t border-slate-200/60 flex items-center gap-1.5 flex-wrap">
@@ -619,7 +763,7 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
                         <span>QR Code</span>
                       </button>
 
-                      {/* Botão Boleto PDF Oficial (Confirmação e Envio no Chat) */}
+                      {/* Botão Boleto PDF Oficial */}
                       <button
                         onClick={() => setBoletoConfirmModal(doc)}
                         className="py-1 px-2 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-lg font-semibold text-[10px] flex items-center gap-1 transition-colors"
@@ -646,12 +790,129 @@ export const CustomerInfoSidebar: React.FC<CustomerInfoSidebarProps> = ({
                 );
               })}
             </div>
-        ) : (
-          <div className="p-3 bg-slate-50 rounded-xl text-center text-slate-400 border border-slate-100 text-[11px]">
-            Nenhum título em aberto localizado no RBX.
+          ) : (
+            <div className="p-3 bg-slate-50 rounded-xl text-center text-slate-400 border border-slate-100 text-[11px]">
+              Nenhum título em aberto localizado no RBX.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Painel Financeiro Nativo (Mercado Pago) */}
+      {(isNative || (isHybrid && nativeCustomer)) && (
+        <div className="space-y-2.5 text-xs">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 font-bold text-slate-800 text-xs">
+              <DollarSign className="w-3.5 h-3.5 text-blue-600" />
+              <span>Faturas (Mercado Pago)</span>
+            </div>
+            {nativeInvoices.length > 0 && (
+              <span
+                className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
+                  nativeInvoices.some((inv) => inv.status === 'overdue')
+                    ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                    : nativeInvoices.some((inv) => inv.status === 'pending')
+                    ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                    : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                }`}
+              >
+                {nativeInvoices.filter((inv) => inv.status === 'overdue').length > 0
+                  ? `${nativeInvoices.filter((inv) => inv.status === 'overdue').length} em atraso`
+                  : nativeInvoices.filter((inv) => inv.status === 'pending').length > 0
+                  ? `${nativeInvoices.filter((inv) => inv.status === 'pending').length} pendente(s)`
+                  : 'Em dia'}
+              </span>
+            )}
           </div>
-        )}
-      </div>
+
+          {nativeInvoices.length > 0 ? (
+            <div className="space-y-2">
+              {nativeInvoices.map((inv) => {
+                const isOverdue = inv.status === 'overdue';
+                const isPaid = inv.status === 'paid';
+                return (
+                  <div
+                    key={inv.id}
+                    className={`p-3 rounded-xl border transition-all ${
+                      isPaid
+                        ? 'bg-emerald-50/30 border-emerald-200'
+                        : isOverdue
+                        ? 'bg-rose-50/40 border-rose-200'
+                        : 'bg-slate-50 border-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-1">
+                      <div>
+                        <span className="font-bold text-slate-900 block truncate max-w-[160px]">
+                          {inv.description}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          Venc: {inv.dueDate} • {inv.paymentMethod.toUpperCase()}
+                        </span>
+                      </div>
+                      <span
+                        className={`font-bold text-xs ${
+                          isPaid ? 'text-emerald-700' : isOverdue ? 'text-rose-700' : 'text-slate-900'
+                        }`}
+                      >
+                        R$ {inv.amount.toFixed(2)}
+                      </span>
+                    </div>
+
+                    {!isPaid && (
+                      <div className="mt-2.5 pt-2 border-t border-slate-200/60 flex items-center gap-1.5 flex-wrap">
+                        {inv.pixQrCode && (
+                          <button
+                            onClick={() => handleCopyNativePix(inv)}
+                            className="flex-1 py-1 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold text-[10px] flex items-center justify-center gap-1 transition-colors shadow-xs"
+                            title="Copiar PIX Copia e Cola"
+                          >
+                            {copiedNativePixId === inv.id ? (
+                              <>
+                                <Check className="w-3 h-3" />
+                                <span>Copiado!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                <span>Copiar PIX</span>
+                              </>
+                            )}
+                          </button>
+                        )}
+                        {(inv.pixQrCodeBase64 || inv.pixQrCode) && (
+                          <button
+                            onClick={() => handleShowNativePixQrCode(inv)}
+                            className="py-1 px-2 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 rounded-lg font-semibold text-[10px] flex items-center gap-1 transition-colors"
+                            title="Ver QR Code do PIX"
+                          >
+                            <QrCode className="w-3 h-3 text-blue-600" />
+                            <span>QR Code</span>
+                          </button>
+                        )}
+                        {inv.boletoUrl && (
+                          <button
+                            onClick={() => handleOpenNativeBoleto(inv)}
+                            className="py-1 px-2 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-lg font-semibold text-[10px] flex items-center gap-1 transition-colors"
+                            title="Abrir Boleto em PDF"
+                          >
+                            <FileText className="w-3 h-3 text-rose-500" />
+                            <span>Boleto PDF</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="p-3 bg-slate-50 rounded-xl text-center text-slate-400 border border-slate-100 text-[11px]">
+              Nenhuma fatura encontrada no cadastro nativo.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Dados do Atendimento */}
       <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1.5 text-xs">

@@ -16,6 +16,11 @@ export type CrmMenuId =
   | 'atendimento_chat'
   | 'atendimento_campanhas'
   | 'atendimento_auditoria'
+  | 'clientes_nativos'
+  | 'planos_servicos'
+  | 'faturas_cobrancas'
+  | 'modo_operacao'
+  | 'licenca_sistema'
   | 'integracoes_gerenciar'
   | 'integracoes_chaves'
   | 'config_rede'
@@ -463,4 +468,144 @@ export interface EvolutionInstance {
   profilePicUrl?: string;
   integration?: string;
   token?: string;
+}
+
+// Modos de Operação do Sistema (ERP vs Nativo vs Híbrido)
+export type OperationMode = 'erp' | 'native' | 'hybrid';
+
+export interface SystemSettings {
+  operationMode: OperationMode;
+  setupCompleted: boolean;
+  companyName: string;
+  companyCnpj: string;
+  companyPhone: string;
+  companyEmail: string;
+  mercadopago: {
+    publicKey: string;
+    maskedToken: string;
+    maskedWebhookSecret: string;
+    sandbox: boolean;
+    configured: boolean;
+  };
+  updatedAt?: string;
+}
+
+export interface SaveSystemSettingsPayload {
+  operationMode: OperationMode;
+  setupCompleted?: boolean;
+  companyName?: string;
+  companyCnpj?: string;
+  companyPhone?: string;
+  companyEmail?: string;
+  mercadopago?: {
+    accessToken?: string;
+    publicKey?: string;
+    webhookSecret?: string;
+    sandbox?: boolean;
+  };
+}
+
+export interface NativePlan {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  billingCycle: string;
+  speedDownload: string;
+  speedUpload: string;
+  active: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface NativeCustomer {
+  id: string;
+  name: string;
+  cpfCnpj: string;
+  email: string;
+  phone: string;
+  address: string;
+  number: string;
+  complement?: string;
+  neighborhood: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  planId?: string;
+  planName?: string;
+  monthlyPrice: number;
+  dueDay: number;
+  status: 'active' | 'blocked' | 'canceled';
+  notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface NativeInvoice {
+  id: string;
+  customerId: string;
+  customerName?: string;
+  cpfCnpj: string;
+  amount: number;
+  dueDate: string;
+  status: 'pending' | 'paid' | 'overdue' | 'canceled';
+  description: string;
+  paymentMethod: string;
+  mpPaymentId?: string;
+  pixQrCode?: string;
+  pixQrCodeBase64?: string;
+  boletoUrl?: string;
+  boletoBarcode?: string;
+  paidAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SystemLicense {
+  licenseKey: string;
+  tenantCnpj: string;
+  tenantName: string;
+  licenseType: 'trial' | 'cortesia' | 'paid';
+  status: 'active' | 'trial' | 'suspended' | 'revoked';
+  trialDaysRemaining: number;
+  expiresAt: string;
+  gracePeriodUntil?: string;
+  lastHeartbeatAt?: string;
+  maxOperators: number;
+  allowedModules: string;
+  allowedOperationMode?: 'erp' | 'native' | 'hybrid';
+  suspensionReason?: string;
+  paymentPix?: string;
+  paymentQrCodeBase64?: string;
+  paymentQRCodeBase64?: string;
+  paymentAmount?: number;
+  discountDescription?: string;
+  discountAmount?: number;
+  contactSupportPhone?: string;
+  contactSupportEmail?: string;
+  updatedAt?: string;
+}
+
+export interface LicensePlanOptions {
+  monthlyPrice: number;
+  annualPrice: number;
+  discountAmount?: number;
+  discountDescription?: string;
+  finalMonthlyPrice: number;
+  finalAnnualPrice: number;
+}
+
+export interface LicenseCheckoutResult {
+  success: boolean;
+  licenseKey: string;
+  cycle: 'monthly' | 'annual';
+  amount: number;
+  discountAmount?: number;
+  paymentMethod: 'pix' | 'mercadopago';
+  paymentPix?: string;
+  paymentQrCode?: string;
+  checkoutUrl?: string;
+  paymentId?: string;
+  status: string;
+  message: string;
 }

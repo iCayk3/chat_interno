@@ -21,8 +21,12 @@ import {
   LogOut,
   Network,
   Search,
+  CreditCard,
+  Package,
+  Sliders,
+  UserCheck,
 } from 'lucide-react';
-import type { CrmMenuId, UserRole, AuthUser } from '../../types/crm';
+import type { CrmMenuId, UserRole, AuthUser, SystemSettings, SystemLicense } from '../../types/crm';
 
 interface CrmSidebarProps {
   activeMenu: CrmMenuId;
@@ -33,6 +37,8 @@ interface CrmSidebarProps {
   onToggleCollapse: () => void;
   currentUser?: AuthUser | null;
   onLogout?: () => void;
+  systemSettings?: SystemSettings | null;
+  license?: SystemLicense | null;
 }
 
 interface MenuItem {
@@ -58,7 +64,17 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
   onToggleCollapse,
   currentUser,
   onLogout,
+  systemSettings,
+  license,
 }) => {
+  const allowedMode = license?.allowedOperationMode || 'hybrid';
+  const isNativeAllowed =
+    (systemSettings?.operationMode === 'native' || systemSettings?.operationMode === 'hybrid') &&
+    allowedMode !== 'erp';
+  const isErpAllowed =
+    (!systemSettings || systemSettings.operationMode === 'erp' || systemSettings.operationMode === 'hybrid') &&
+    allowedMode !== 'native';
+
   // Configuração mestre de menus com controle de acesso estrito (RBAC)
   const allSections: MenuSection[] = [
     {
@@ -77,6 +93,33 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
         },
       ],
     },
+    ...(isNativeAllowed
+      ? [
+          {
+            title: 'CLIENTES & COBRANÇA',
+            items: [
+              {
+                id: 'clientes_nativos' as CrmMenuId,
+                label: 'Clientes & Assinantes',
+                icon: UserCheck,
+                allowedRoles: ['gestor', 'admin'] as UserRole[],
+              },
+              {
+                id: 'planos_servicos' as CrmMenuId,
+                label: 'Planos & Serviços',
+                icon: Package,
+                allowedRoles: ['admin'] as UserRole[],
+              },
+              {
+                id: 'faturas_cobrancas' as CrmMenuId,
+                label: 'Faturas & Mercado Pago',
+                icon: CreditCard,
+                allowedRoles: ['gestor', 'admin'] as UserRole[],
+              },
+            ],
+          },
+        ]
+      : []),
     {
       title: 'EMPRESA',
       items: [
@@ -162,19 +205,29 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
       ],
     },
     {
-      title: 'INTEGRAÇÕES',
+      title: 'INTEGRAÇÕES & MODO',
       items: [
+        ...(isErpAllowed
+          ? [
+              {
+                id: 'integracoes_gerenciar' as CrmMenuId,
+                label: 'Gerenciar (ERP)',
+                icon: Rocket,
+                allowedRoles: ['admin'] as UserRole[],
+              },
+            ]
+          : []),
         {
-          id: 'integracoes_gerenciar',
-          label: 'Gerenciar (ERP)',
-          icon: Rocket,
-          allowedRoles: ['admin'], // Integração ERP sensível restrita a administradores
+          id: 'modo_operacao' as CrmMenuId,
+          label: 'Modo de Operação',
+          icon: Sliders,
+          allowedRoles: ['admin'] as UserRole[],
         },
         {
-          id: 'integracoes_chaves',
+          id: 'integracoes_chaves' as CrmMenuId,
           label: 'Chaves para acesso',
           icon: Lock,
-          allowedRoles: ['admin'], // Chaves e tokens estritamente para admin
+          allowedRoles: ['admin'] as UserRole[],
         },
       ],
     },
@@ -186,6 +239,12 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
           label: 'Rede',
           icon: Network,
           allowedRoles: ['gestor', 'admin'],
+        },
+        {
+          id: 'licenca_sistema' as CrmMenuId,
+          label: 'Licença & Assinatura',
+          icon: ShieldCheck,
+          allowedRoles: ['gestor', 'admin'] as UserRole[],
         },
       ],
     },

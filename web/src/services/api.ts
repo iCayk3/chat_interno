@@ -25,6 +25,14 @@ import type {
   WhatsAppOfficialConfig,
   WhatsAppEvolutionConfig,
   EvolutionInstance,
+  SystemSettings,
+  SaveSystemSettingsPayload,
+  NativePlan,
+  NativeCustomer,
+  NativeInvoice,
+  SystemLicense,
+  LicensePlanOptions,
+  LicenseCheckoutResult,
 } from '../types/crm';
 
 function getAuthHeaders(): HeadersInit {
@@ -36,6 +44,24 @@ function getAuthHeaders(): HeadersInit {
     headers['Authorization'] = `Bearer ${token}`;
   }
   return headers;
+}
+
+// Interceptor global para interceptar 402 (licença suspensa) instantaneamente em qualquer tela
+if (typeof window !== 'undefined' && !(window as any).__solFetchIntercepted) {
+  (window as any).__solFetchIntercepted = true;
+  const originalFetch = window.fetch;
+  window.fetch = async (...args) => {
+    const res = await originalFetch(...args);
+    if (res.status === 402) {
+      try {
+        const clone = res.clone();
+        clone.json().then((data) => {
+          window.dispatchEvent(new CustomEvent('license:suspended', { detail: data }));
+        }).catch(() => {});
+      } catch {}
+    }
+    return res;
+  };
 }
 
 export const api = {
@@ -917,6 +943,349 @@ export const api = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Falha ao iniciar atendimento avulso');
+    }
+    return res.json();
+  },
+
+  // ==========================================================================
+  // CONFIGURAÇÕES DO SISTEMA & MODOS DE OPERAÇÃO (ERP vs NATIVO vs HÍBRIDO)
+  // ==========================================================================
+  async getSystemSettings(): Promise<SystemSettings> {
+    const res = await fetch('/api/system/settings', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao carregar configurações do sistema');
+    }
+    return res.json();
+  },
+
+  async saveSystemSettings(payload: SaveSystemSettingsPayload): Promise<SystemSettings> {
+    const res = await fetch('/api/system/settings', {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar configurações do sistema');
+    }
+    return res.json();
+  },
+
+  async testMercadoPago(accessToken?: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch('/api/system/mercadopago/test', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ accessToken: accessToken || '' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || 'Falha ao autenticar com o Mercado Pago');
+    }
+    return data;
+  },
+
+  // ==========================================================================
+  // PLANOS E SERVIÇOS NATIVOS
+  // ==========================================================================
+  async getNativePlans(): Promise<NativePlan[]> {
+    const res = await fetch('/api/native/plans', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao buscar planos');
+    }
+    return res.json();
+  },
+
+  async createNativePlan(plan: Partial<NativePlan>): Promise<NativePlan> {
+    const res = await fetch('/api/native/plans', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(plan),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao criar plano');
+    }
+    return res.json();
+  },
+
+  async updateNativePlan(id: string, plan: Partial<NativePlan>): Promise<NativePlan> {
+    const res = await fetch(`/api/native/plans/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(plan),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao atualizar plano');
+    }
+    return res.json();
+  },
+
+  async deleteNativePlan(id: string): Promise<void> {
+    const res = await fetch(`/api/native/plans/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao desativar plano');
+    }
+  },
+
+  // ==========================================================================
+  // CLIENTES NATIVOS
+  // ==========================================================================
+  async getNativeCustomers(params?: { search?: string; status?: string; planId?: string }): Promise<NativeCustomer[]> {
+    const query = new URLSearchParams();
+    if (params?.search) query.set('search', params.search);
+    if (params?.status) query.set('status', params.status);
+    if (params?.planId) query.set('planId', params.planId);
+
+    const res = await fetch(`/api/native/customers?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao listar clientes');
+    }
+    return res.json();
+  },
+
+  async getNativeCustomer(id: string): Promise<NativeCustomer> {
+    const res = await fetch(`/api/native/customers/${encodeURIComponent(id)}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Cliente não encontrado');
+    }
+    return res.json();
+  },
+
+  async lookupNativeCustomer(cpfCnpj: string): Promise<NativeCustomer> {
+    const res = await fetch(`/api/native/customers/lookup?cpfCnpj=${encodeURIComponent(cpfCnpj)}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Cliente não localizado na base nativa');
+    }
+    return res.json();
+  },
+
+  async createNativeCustomer(data: any): Promise<NativeCustomer> {
+    const res = await fetch('/api/native/customers', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao cadastrar cliente');
+    }
+    return res.json();
+  },
+
+  async updateNativeCustomer(id: string, data: any): Promise<NativeCustomer> {
+    const res = await fetch(`/api/native/customers/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao atualizar cliente');
+    }
+    return res.json();
+  },
+
+  async deleteNativeCustomer(id: string): Promise<void> {
+    const res = await fetch(`/api/native/customers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao excluir cliente');
+    }
+  },
+
+  // ==========================================================================
+  // FATURAS E MERCADO PAGO
+  // ==========================================================================
+  async getNativeInvoices(params?: { customerId?: string; cpfCnpj?: string; status?: string }): Promise<NativeInvoice[]> {
+    const query = new URLSearchParams();
+    if (params?.customerId) query.set('customerId', params.customerId);
+    if (params?.cpfCnpj) query.set('cpfCnpj', params.cpfCnpj);
+    if (params?.status) query.set('status', params.status);
+
+    const res = await fetch(`/api/native/invoices?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao listar faturas');
+    }
+    return res.json();
+  },
+
+  async getNativeInvoice(id: string): Promise<NativeInvoice> {
+    const res = await fetch(`/api/native/invoices/${encodeURIComponent(id)}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Fatura não encontrada');
+    }
+    return res.json();
+  },
+
+  async createNativeInvoice(data: any): Promise<NativeInvoice> {
+    const res = await fetch('/api/native/invoices', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao emitir fatura');
+    }
+    return res.json();
+  },
+
+  async generateNativePix(id: string): Promise<{ success: boolean; pixQrCode: string; pixQrCodeBase64: string }> {
+    const res = await fetch(`/api/native/invoices/${encodeURIComponent(id)}/pix`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao gerar Pix no Mercado Pago');
+    }
+    return res.json();
+  },
+
+  async generateNativeBoleto(id: string): Promise<{ success: boolean; boletoUrl: string; boletoBarcode: string }> {
+    const res = await fetch(`/api/native/invoices/${encodeURIComponent(id)}/boleto`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao emitir boleto no Mercado Pago');
+    }
+    return res.json();
+  },
+
+  async payNativeInvoiceManual(id: string): Promise<NativeInvoice> {
+    const res = await fetch(`/api/native/invoices/${encodeURIComponent(id)}/pay-manual`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao registrar pagamento manual');
+    }
+    return res.json();
+  },
+
+  async sendNativeInvoiceToChat(data: {
+    conversationId: string;
+    invoiceId: string;
+    method: 'pix' | 'boleto';
+    operatorId?: string;
+    operatorName?: string;
+  }): Promise<any> {
+    const res = await fetch(`/api/native/invoices/${encodeURIComponent(data.invoiceId)}/send-to-chat`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao enviar fatura para a conversa');
+    }
+    return res.json();
+  },
+
+  // --- Licenciamento do Sistema ---
+  async getLicenseStatus(): Promise<SystemLicense> {
+    const res = await fetch('/api/system/license', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao consultar status da licença');
+    }
+    return res.json();
+  },
+
+  async activateLicense(licenseKey: string): Promise<{ success: boolean; message: string; license: SystemLicense }> {
+    const res = await fetch('/api/system/license/activate', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ licenseKey }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao ativar chave de licença');
+    }
+    return res.json();
+  },
+
+  async refreshLicense(): Promise<{ success: boolean; message: string; license: SystemLicense }> {
+    const res = await fetch('/api/system/license/refresh', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao sincronizar licença');
+    }
+    return res.json();
+  },
+
+  async getLicensePlans(): Promise<LicensePlanOptions> {
+    const res = await fetch('/api/system/license/plans', {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao consultar planos de licença');
+    }
+    return res.json();
+  },
+
+  async createLicenseCheckout(
+    cycle: 'monthly' | 'annual',
+    paymentMethod: 'pix' | 'mercadopago'
+  ): Promise<LicenseCheckoutResult> {
+    const res = await fetch('/api/system/license/checkout', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ cycle, paymentMethod }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao gerar cobrança da licença');
+    }
+    return res.json();
+  },
+
+  async checkPaymentStatus(): Promise<{ success: boolean; active: boolean; license: SystemLicense }> {
+    const res = await fetch('/api/system/license/check-payment', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao verificar pagamento');
     }
     return res.json();
   },

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { Conversation, Message, ConversationStatus } from './types/chat';
-import type { CrmMenuId, UserRole, AuthUser } from './types/crm';
+import type { CrmMenuId, UserRole, AuthUser, SystemSettings } from './types/crm';
 import { api } from './services/api';
 import { operatorSocket } from './services/operatorSocket';
 import { Sidebar } from './components/Sidebar';
@@ -28,6 +28,19 @@ import { MeusDadosView } from './components/crm/MeusDadosView';
 import { ConfigRedeView } from './components/crm/ConfigRedeView';
 import { MeuPerfilModal } from './components/crm/MeuPerfilModal';
 import { NovoAtendimentoModal } from './components/chat/NovoAtendimentoModal';
+
+// Modos de Operação & Cobrança Nativa / Mercado Pago
+import { SetupWizardModal } from './components/crm/SetupWizardModal';
+import { ModoOperacaoView } from './components/crm/ModoOperacaoView';
+import { ClientesView } from './components/crm/ClientesView';
+import { PlanosServicosView } from './components/crm/PlanosServicosView';
+import { FaturasView } from './components/crm/FaturasView';
+
+// Licenciamento do Sistema
+import { LicencaView } from './components/crm/LicencaView';
+import { TrialBanner } from './components/license/TrialBanner';
+import { LicenseSuspendedScreen } from './components/license/LicenseSuspendedScreen';
+import type { SystemLicense } from './types/crm';
 import { isSameDepartment } from './utils/rbac';
 import { BellRing, AlertCircle } from 'lucide-react';
 import {
@@ -87,6 +100,34 @@ export const App: React.FC = () => {
     getNotificationPermissionStatus()
   );
 
+  // Modos de Operação do Sistema (ERP vs Nativo vs Híbrido) & Setup Wizard
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [isSetupWizardOpen, setIsSetupWizardOpen] = useState(false);
+
+  // Status de Licenciamento & Avaliação Gratuita (Abordagem B)
+  const [license, setLicense] = useState<SystemLicense | null>(null);
+
+  const loadLicense = async () => {
+    try {
+      const data = await api.getLicenseStatus();
+      setLicense(data);
+    } catch (err) {
+      console.warn('Erro ao verificar licença:', err);
+    }
+  };
+
+  const loadSystemSettings = async () => {
+    try {
+      const data = await api.getSystemSettings();
+      setSystemSettings(data);
+      if (data && !data.setupCompleted && userRole === 'admin') {
+        setIsSetupWizardOpen(true);
+      }
+    } catch (err) {
+      console.warn('Erro ao carregar configurações do sistema:', err);
+    }
+  };
+
   const handleToggleWindowsNotifications = async () => {
     if (notifPermission === 'granted') {
       playClientMessageSound();
@@ -134,6 +175,8 @@ export const App: React.FC = () => {
     } else {
       setActiveMenu('dashboard');
     }
+    loadSystemSettings();
+    loadLicense();
   };
 
   const handleLogout = () => {
@@ -144,24 +187,53 @@ export const App: React.FC = () => {
     operatorSocket.disconnect();
   };
 
-  // Validação proativa de sessão no mount e escuta para expiração de token (401)
+  // Validação proativa de sessão no mount, polling rápido de licença (3s) e escuta para expiração de token (401) e bloqueio (402)
   useEffect(() => {
+    loadLicense();
     if (currentUser) {
       api.getMe().catch((err) => {
         console.warn('Sessão expirada ou inválida ao iniciar:', err);
         handleLogout();
       });
+      loadSystemSettings();
     }
 
     const handleAuthExpired = () => {
       handleLogout();
     };
 
+    const handleLicenseSuspended = (e: any) => {
+      const detail = e.detail;
+      setLicense((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          status: 'suspended',
+          suspensionReason: detail?.message || detail?.suspensionReason || 'Instalação bloqueada pelo Master Control Plane.',
+          paymentPix: detail?.paymentPix || prev.paymentPix,
+          paymentQrCodeBase64: detail?.paymentQrCodeBase64 || prev.paymentQrCodeBase64,
+          paymentAmount: detail?.paymentAmount || prev.paymentAmount,
+        };
+      });
+    };
+
     window.addEventListener('auth:expired', handleAuthExpired);
+    window.addEventListener('license:suspended', handleLicenseSuspended);
+
+    // Polling de alta fidelidade para sincronizar status e modo de operação com o Master instantaneamente
+    const licenseInterval = setInterval(() => {
+      loadLicense();
+      if (currentUser) {
+        loadSystemSettings();
+      }
+    }, 3000);
+
     return () => {
       window.removeEventListener('auth:expired', handleAuthExpired);
+      window.removeEventListener('license:suspended', handleLicenseSuspended);
+      clearInterval(licenseInterval);
     };
-  }, []);
+  }, [currentUser]);
 
   // Carrega lista de conversas
   const loadConversations = async () => {
@@ -198,6 +270,7 @@ export const App: React.FC = () => {
 
     operatorSocket.setOperator(currentUser.id, currentUser.name);
     loadConversations();
+    loadSystemSettings();
 
     // Conecta o WebSocket do operador
     operatorSocket.connect();
@@ -294,6 +367,9 @@ export const App: React.FC = () => {
         setSelectedId(null);
         setMessages([]);
         loadConversations();
+      } else if (action.type === 'license_updated') {
+        loadLicense();
+        loadSystemSettings();
       }
     });
 
@@ -492,6 +568,8 @@ export const App: React.FC = () => {
         'atendimento_canais',
         'integracoes_gerenciar',
         'integracoes_chaves',
+        'planos_servicos',
+        'modo_operacao',
       ];
       if (adminOnlyMenus.includes(activeMenu)) {
         return (
@@ -533,6 +611,28 @@ export const App: React.FC = () => {
 
       case 'integracoes_chaves':
         return <ChavesAcessoView />;
+
+      case 'modo_operacao':
+        return (
+          <ModoOperacaoView
+            license={license}
+            onSettingsSaved={(updated: SystemSettings) => {
+              setSystemSettings(updated);
+            }}
+          />
+        );
+
+      case 'licenca_sistema':
+        return <LicencaView onLicenseUpdated={(lic) => setLicense(lic)} />;
+
+      case 'clientes_nativos':
+        return <ClientesView />;
+
+      case 'planos_servicos':
+        return <PlanosServicosView />;
+
+      case 'faturas_cobrancas':
+        return <FaturasView />;
 
       case 'empresa_dados':
         return <DadosEmpresaView />;
@@ -658,6 +758,7 @@ export const App: React.FC = () => {
             {selectedConversation && (
               <CustomerInfoSidebar
                 conversation={selectedConversation}
+                systemSettings={systemSettings}
                 onSendPixToChat={(pixCode) =>
                   handleSendMessage(`Segue o código PIX Copia e Cola referente à sua fatura:\n\n${pixCode}`)
                 }
@@ -685,6 +786,8 @@ export const App: React.FC = () => {
         onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
         currentUser={currentUser}
         onLogout={handleLogout}
+        systemSettings={systemSettings}
+        license={license}
       />
 
       {/* Conteúdo Dinâmico Selecionado */}
@@ -728,8 +831,25 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {renderMainContent()}
+        {/* Conteúdo Dinâmico Principal */}
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          {renderMainContent()}
+        </div>
+
+        {/* Banner de Avaliação Gratuita (Trial) / Licença Fixado no Rodapé */}
+        <TrialBanner
+          license={license}
+          onOpenLicenseModal={() => setActiveMenu('licenca_sistema')}
+        />
       </div>
+
+      {/* Tela de Bloqueio em caso de Licença Suspensa ou Revogada */}
+      {license && (license.status === 'suspended' || license.status === 'revoked') && (
+        <LicenseSuspendedScreen
+          license={license}
+          onLicenseUpdated={(updated) => setLicense(updated)}
+        />
+      )}
 
       {/* Modal de Perfil do Operador / Gestor */}
       <MeuPerfilModal
@@ -750,6 +870,18 @@ export const App: React.FC = () => {
           setActiveTab('active');
           setSelectedId(newConv.id);
           setActiveMenu('atendimento_chat');
+        }}
+      />
+
+      {/* Assistente de Configuração Inicial (Modo de Trabalho: ERP vs Nativo) */}
+      <SetupWizardModal
+        isOpen={isSetupWizardOpen}
+        onClose={() => setIsSetupWizardOpen(false)}
+        currentSettings={systemSettings}
+        license={license}
+        onCompleted={(updated: SystemSettings) => {
+          setSystemSettings(updated);
+          setIsSetupWizardOpen(false);
         }}
       />
 

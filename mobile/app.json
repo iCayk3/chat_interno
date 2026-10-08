@@ -2,6 +2,7 @@
   "expo": {
     "name": "SOL Central",
     "slug": "sol-central",
+    "scheme": "solchat",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

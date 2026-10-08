@@ -25,8 +25,9 @@ import { RootStackParamList, ClientProfile, ConversationSession, Message } from 
 import { colors } from '../theme/colors';
 import { storage } from '../services/storage';
 import { downloadAndSavePdf } from '../services/fileDownload';
-import { chatSocket } from '../services/chatSocket';
+import { chatSocket, isWhiteLabelBuild, testServerConnection } from '../services/chatSocket';
 import { notificationService, NotificationPayload } from '../services/notificationService';
+import { ServerConfigModal } from '../components/ServerConfigModal';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Welcome'>;
 
@@ -115,6 +116,10 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
   const [isProcessingUnlock, setIsProcessingUnlock] = useState(false);
   const [unlockSuccessMsg, setUnlockSuccessMsg] = useState<string | null>(null);
 
+  // Estados de Conexão com Servidor (Híbrido)
+  const [showServerModal, setShowServerModal] = useState(false);
+  const [connectedServerCompany, setConnectedServerCompany] = useState<string | null>(null);
+
   // Recarrega sempre que a tela ganha foco (ao voltar do chat)
   useFocusEffect(
     useCallback(() => {
@@ -123,26 +128,52 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
   );
 
   const getApiBaseUrl = () => {
-    if (Platform.OS === 'web') {
-      if (typeof window !== 'undefined' && window.location && window.location.hostname) {
-        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-          return 'http://localhost:8080';
-        }
-        return `http://${window.location.hostname}:8080`;
-      }
-      return 'http://localhost:8080';
-    }
-
-    const hostUri = Constants.expoConfig?.hostUri || (Constants as any).manifest2?.extra?.expoClient?.hostUri;
-    if (hostUri) {
-      const ip = hostUri.split(':')[0];
-      if (ip && ip !== 'localhost' && ip !== '127.0.0.1' && !ip.startsWith('127.')) {
-        return `http://${ip}:8080`;
-      }
-    }
-
-    return 'http://10.12.199.3:8080';
+    return chatSocket.getApiHttpBaseUrl();
   };
+
+  // Inicialização do servidor configurado e escuta de pareamento via Deep Linking
+  useEffect(() => {
+    chatSocket.initConfig().then(async () => {
+      const savedName = await storage.getServerCompanyName();
+      if (savedName) {
+        setConnectedServerCompany(savedName);
+      } else {
+        try {
+          const res = await fetch(`${chatSocket.getApiHttpBaseUrl()}/api/health`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.companyName) {
+              setConnectedServerCompany(data.companyName);
+              await storage.saveServerUrl(chatSocket.getApiHttpBaseUrl(), data.companyName);
+            }
+          }
+        } catch {}
+      }
+    });
+
+    // Escuta deep linking (ex: solchat://connect?server=...)
+    const handleUrl = async (urlStr: string | null) => {
+      if (!urlStr || isWhiteLabelBuild()) return;
+      try {
+        if (urlStr.includes('server=')) {
+          const match = urlStr.match(/server=([^&]+)/);
+          if (match && match[1]) {
+            const raw = decodeURIComponent(match[1]);
+            const res = await testServerConnection(raw);
+            await storage.saveServerUrl(res.url, res.companyName);
+            setConnectedServerCompany(res.companyName);
+            Alert.alert('Servidor Pareado! ✅', `Aplicativo conectado com sucesso a ${res.companyName}.`);
+          }
+        }
+      } catch (err: any) {
+        console.warn('[DEEP LINK] Falha ao parear servidor:', err);
+      }
+    };
+
+    Linking.getInitialURL().then(handleUrl);
+    const sub = Linking.addEventListener('url', (e) => handleUrl(e.url));
+    return () => sub.remove();
+  }, []);
 
   // Busca comunicados e notificações de campanhas direcionadas a este cliente/aparelho
   const fetchClientNotifications = async (docClean?: string) => {
@@ -781,12 +812,29 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
         >
           {/* Header branding */}
           <View style={styles.header}>
+            {!isWhiteLabelBuild() && (
+              <TouchableOpacity
+                style={styles.serverPill}
+                onPress={() => setShowServerModal(true)}
+                activeOpacity={0.8}
+              >
+                <View style={styles.serverPillDot} />
+                <Ionicons name="server-outline" size={13} color="#2563EB" />
+                <Text style={styles.serverPillText} numberOfLines={1}>
+                  {connectedServerCompany ? `Servidor: ${connectedServerCompany}` : 'Conectar Servidor'}
+                </Text>
+                <Ionicons name="swap-horizontal" size={12} color="#64748B" />
+              </TouchableOpacity>
+            )}
+
             <View style={styles.logoBadge}>
               <Ionicons name="chatbubbles" size={34} color={colors.primary} />
             </View>
-            <Text style={styles.title}>Central de Atendimento</Text>
+            <Text style={styles.title}>
+              {connectedServerCompany || 'Central de Atendimento'}
+            </Text>
             <Text style={styles.subtitle}>
-              Conectado ao ERP RBXSoft ISP • Identifique-se para iniciar.
+              Atendimento em tempo real • Identifique-se para iniciar.
             </Text>
           </View>
 
@@ -1716,6 +1764,16 @@ export const WelcomeScreen: React.FC<Props> = ({ navigation }) => {
           </View>
         </View>
       </Modal>
+
+      {/* Modal de Conexão com Servidor (Híbrido) */}
+      <ServerConfigModal
+        visible={showServerModal}
+        onClose={() => setShowServerModal(false)}
+        onConnected={(company) => {
+          setConnectedServerCompany(company);
+          fetchClientNotifications();
+        }}
+      />
     </View>
   );
 };
@@ -1736,6 +1794,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 12,
     marginBottom: 20,
+  },
+  serverPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 6,
+    marginBottom: 14,
+    alignSelf: 'center',
+    maxWidth: '90%',
+  },
+  serverPillDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#10B981',
+  },
+  serverPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1E40AF',
   },
   logoBadge: {
     width: 64,

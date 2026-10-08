@@ -80,6 +80,37 @@ export const CanaisView: React.FC = () => {
   const [testingTelegram, setTestingTelegram] = useState<boolean>(false);
   const [telegramWebhookInput, setTelegramWebhookInput] = useState<string>('');
 
+  // Configuração do Servidor do App Mobile & QR Code
+  const [mobileServerUrl, setMobileServerUrl] = useState<string>(() => {
+    return window.location.origin.includes(':5173')
+      ? `http://${window.location.hostname}:8080`
+      : window.location.origin;
+  });
+  const [serverHealthStatus, setServerHealthStatus] = useState<{ ok: boolean; companyName?: string } | null>(null);
+  const [testingHealth, setTestingHealth] = useState<boolean>(false);
+
+  const testMobileServerHealth = async (overrideUrl?: string) => {
+    const target = (overrideUrl || mobileServerUrl).trim().replace(/\/+$/, '');
+    if (!target) return;
+    setTestingHealth(true);
+    try {
+      const res = await fetch(`${target}/api/health`);
+      if (res.ok) {
+        const data = await res.json();
+        setServerHealthStatus({ ok: true, companyName: data.companyName });
+        showMsg('success', `Servidor online e acessível! Empresa: ${data.companyName || 'Identificada'}`);
+      } else {
+        setServerHealthStatus({ ok: false });
+        showMsg('error', `Servidor respondeu com código HTTP ${res.status}`);
+      }
+    } catch {
+      setServerHealthStatus({ ok: false });
+      showMsg('error', 'Não foi possível alcançar o servidor na URL informada.');
+    } finally {
+      setTestingHealth(false);
+    }
+  };
+
   // Copied helper
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -1124,53 +1155,258 @@ export const CanaisView: React.FC = () => {
       {/* Tab 4: App Mobile & Web Widget */}
       {activeTab === 'mobile_web' && (
         <div className="bg-white p-6 rounded-b-xl border border-slate-200 shadow-2xs space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="border border-slate-200 rounded-xl p-5 space-y-3">
+          {/* Header explicativo do App Mobile */}
+          <div className="border border-blue-200 bg-blue-50/50 rounded-xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xs shrink-0">
+                <Smartphone className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-800 text-base">Central de Pareamento & Distribuição do App Mobile</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Conecte os celulares dos clientes ao seu servidor com 1 toque (App Universal) ou gere um build exclusivo (White-Label).
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold flex items-center gap-1.5 border border-emerald-200">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                Hub WebSocket Ativo (/ws)
+              </span>
+            </div>
+          </div>
+
+          {/* Configuração do Endereço Público do Servidor */}
+          <div className="border border-slate-200 rounded-xl p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-slate-800 flex items-center gap-2">
+                <Server className="w-4 h-4 text-blue-600" />
+                <span>Endereço Público do Servidor (Base URL do App)</span>
+              </label>
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white">
-                  <Smartphone className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Aplicativo Mobile dos Clientes</h3>
-                  <span className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    WebSockets Nativos Conectados
+                {serverHealthStatus && (
+                  <span className={`text-xs font-semibold flex items-center gap-1.5 ${serverHealthStatus.ok ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {serverHealthStatus.ok ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Online ({serverHealthStatus.companyName || 'Ativo'})</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="w-4 h-4" />
+                        <span>Inacessível</span>
+                      </>
+                    )}
+                  </span>
+                )}
+                <button
+                  onClick={() => testMobileServerHealth()}
+                  disabled={testingHealth}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  {testingHealth ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                  <span>Testar Acessibilidade (/api/health)</span>
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Informe o endereço público ou domínio pelo qual o aplicativo dos clientes acessará este servidor (ex: <code>https://chat.suaempresa.com.br</code> ou <code>http://45.166.31.237:8080</code>).
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={mobileServerUrl}
+                onChange={(e) => setMobileServerUrl(e.target.value)}
+                placeholder="https://chat.suaempresa.com.br ou http://seu-ip:8080"
+                className="flex-1 px-3.5 py-2.5 rounded-lg border border-slate-200 text-xs text-slate-800 font-mono focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                onClick={() => copyToClipboard(mobileServerUrl, 'mobile_server_url')}
+                className="px-3.5 py-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-medium transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
+              >
+                {copiedKey === 'mobile_server_url' ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4 text-slate-400" />}
+                <span>{copiedKey === 'mobile_server_url' ? 'Copiado!' : 'Copiar URL'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Grid dos 2 Modelos: Universal vs White-Label */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Modelo 1: App Universal / Pareamento por QR Code */}
+            <div className="border-2 border-blue-100 rounded-xl p-5 space-y-4 bg-gradient-to-b from-blue-50/30 to-white flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <QrCode className="w-5 h-5 text-blue-600" />
+                    <h4 className="font-bold text-slate-800 text-sm">Modelo 1: Pareamento por QR Code (App Universal)</h4>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-100 text-blue-700">
+                    Sem Compilação
                   </span>
                 </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Os clientes baixam o <strong>aplicativo padrão na loja</strong> e apontam a câmera para este QR Code. A base do servidor é gravada instantaneamente no celular.
+                </p>
+
+                {/* Exibição do QR Code */}
+                <div className="my-4 text-center">
+                  <div className="w-56 h-56 mx-auto p-2.5 rounded-2xl bg-white border-2 border-blue-200/60 shadow-md flex items-center justify-center">
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(
+                        `solchat://connect?server=${encodeURIComponent(mobileServerUrl.trim())}`
+                      )}`}
+                      alt="QR Code de Conexão do Servidor"
+                      className="w-full h-full object-contain rounded-lg"
+                    />
+                  </div>
+                  <span className="text-[11px] text-slate-400 mt-2 block font-mono">
+                    solchat://connect?server={encodeURIComponent(mobileServerUrl.trim())}
+                  </span>
+                </div>
+
+                {/* Passos didáticos para os clientes */}
+                <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-2 text-xs text-slate-600">
+                  <div className="font-semibold text-slate-800 text-[11px] uppercase tracking-wider">Como orientar seu cliente:</div>
+                  <div className="flex items-start gap-2">
+                    <span className="w-4 h-4 rounded-full bg-blue-100 text-blue-700 font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+                    <span>Cliente instala o aplicativo <strong>SOL Central</strong> pela Play Store / App Store.</span>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="w-4 h-4 rounded-full bg-blue-100 text-blue-700 font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+                    <span>Abre o app e aponta a câmera para este <strong>QR Code</strong> (ou clica no link direto abaixo).</span>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="w-4 h-4 rounded-full bg-blue-100 text-blue-700 font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+                    <span>O celular conecta à sua base para sempre e já libera o autoatendimento e o chat com atendentes!</span>
+                  </div>
+                </div>
               </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Desenvolvido em <strong>React Native (Expo SDK 53)</strong> para Android e iOS.
-                Conecta-se ao servidor através de <code>ws://&lt;ip&gt;:8080/ws</code>, fornecendo autoatendimento rápido com boletos PIX do RBXSoft e encaminhamento com 1 clique para operadores.
-              </p>
-              <div className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100 space-y-1">
-                <div>• Identificação automática via CPF/CNPJ e Nome</div>
-                <div>• Suporte a Notificações em segundo plano</div>
-                <div>• Avaliação de atendimento de 1 a 5 estrelas</div>
+
+              {/* Botões de Ação do Pareamento */}
+              <div className="flex flex-col sm:flex-row items-stretch gap-2 pt-2">
+                <button
+                  onClick={() => copyToClipboard(`solchat://connect?server=${encodeURIComponent(mobileServerUrl.trim())}`, 'deep_link')}
+                  className="flex-1 py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                >
+                  {copiedKey === 'deep_link' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedKey === 'deep_link' ? 'Link Copiado!' : 'Copiar Link de Pareamento'}</span>
+                </button>
+                <a
+                  href={`https://api.qrserver.com/v1/create-qr-code/?size=600x600&data=${encodeURIComponent(
+                    `solchat://connect?server=${encodeURIComponent(mobileServerUrl.trim())}`
+                  )}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="py-2 px-3 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors text-center"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Imprimir / Salvar Imagem</span>
+                </a>
               </div>
             </div>
 
-            <div className="border border-slate-200 rounded-xl p-5 space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-purple-600 flex items-center justify-center text-white">
-                  <Globe className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Widget Web do Assinante</h3>
-                  <span className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    Pronto para Embutir
+            {/* Modelo 2: Build White-Label Exclusivo */}
+            <div className="border border-slate-200 rounded-xl p-5 space-y-4 bg-slate-50/50 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Server className="w-5 h-5 text-indigo-600" />
+                    <h4 className="font-bold text-slate-800 text-sm">Modelo 2: Compilação White-Label (App Exclusivo)</h4>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-100 text-indigo-700">
+                    Marca Própria
                   </span>
                 </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Caso deseje publicar um aplicativo próprio na Google Play / App Store com o nome e o logotipo da sua empresa, gere o build informando a variável de ambiente abaixo. A URL ficará <strong>fixada no código binário</strong> e os clientes entrarão direto sem nenhuma etapa de configuração.
+                </p>
+
+                {/* Bloco de Código de Build */}
+                <div className="mt-4 space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Comando de Compilação Local (APK Android Release):
+                    </label>
+                    <div className="bg-slate-900 text-slate-200 p-3 rounded-lg font-mono text-[11px] relative flex items-center justify-between group">
+                      <span className="break-all select-all">
+                        EXPO_PUBLIC_API_URL="{mobileServerUrl.trim()}" npx expo run:android --variant release
+                      </span>
+                      <button
+                        onClick={() => copyToClipboard(`EXPO_PUBLIC_API_URL="${mobileServerUrl.trim()}" npx expo run:android --variant release`, 'cmd_local')}
+                        className="ml-2 p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors shrink-0 cursor-pointer"
+                        title="Copiar comando"
+                      >
+                        {copiedKey === 'cmd_local' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Comando EAS Cloud Build (Produção / Play Store):
+                    </label>
+                    <div className="bg-slate-900 text-slate-200 p-3 rounded-lg font-mono text-[11px] relative flex items-center justify-between group">
+                      <span className="break-all select-all">
+                        EXPO_PUBLIC_API_URL="{mobileServerUrl.trim()}" eas build --platform android --profile production
+                      </span>
+                      <button
+                        onClick={() => copyToClipboard(`EXPO_PUBLIC_API_URL="${mobileServerUrl.trim()}" eas build --platform android --profile production`, 'cmd_eas')}
+                        className="ml-2 p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors shrink-0 cursor-pointer"
+                        title="Copiar comando"
+                      >
+                        {copiedKey === 'cmd_eas' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 text-[11px] text-slate-500 bg-white p-3 rounded-lg border border-slate-200 space-y-1">
+                  <div>✓ <strong>Zero configuração para o cliente:</strong> Baixou na Play Store, abre direto no chat.</div>
+                  <div>✓ <strong>Identidade visual completa:</strong> Nome, cores e ícone da empresa na tela do celular.</div>
+                  <div>✓ <strong>Segurança reforçada:</strong> URL criptografada dentro do binário assinado.</div>
+                </div>
               </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Widget embutível via script para inclusão na Central do Assinante Web ou site institucional da empresa.
-                Compartilha as mesmas salas e operadores do painel central.
-              </p>
-              <div className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100 space-y-1">
-                <div>• Endpoint do Hub: <code>/ws</code></div>
-                <div>• Total compatibilidade com protocolo JSON</div>
-                <div>• Transferência inteligente entre departamentos</div>
+
+              {/* Botão para copiar variável de ambiente */}
+              <div className="pt-2">
+                <button
+                  onClick={() => copyToClipboard(`EXPO_PUBLIC_API_URL="${mobileServerUrl.trim()}"`, 'env_var')}
+                  className="w-full py-2 px-3 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  {copiedKey === 'env_var' ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4 text-slate-400" />}
+                  <span>{copiedKey === 'env_var' ? 'Variável Copiada!' : 'Copiar Variável EXPO_PUBLIC_API_URL'}</span>
+                </button>
               </div>
+            </div>
+          </div>
+
+          {/* Widget Web do Assinante */}
+          <div className="border border-slate-200 rounded-xl p-5 space-y-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-purple-600 flex items-center justify-center text-white shrink-0">
+                <Globe className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">Widget Web do Assinante (Para Site ou Central Web)</h3>
+                <span className="text-[11px] text-purple-600 font-semibold">
+                  Script pronto para incorporar na sua Central do Assinante
+                </span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Incorpore o chat de atendimento em qualquer página web ou Central do Assinante adicionando a tag de script abaixo antes do fechamento de <code>&lt;/body&gt;</code>.
+            </p>
+            <div className="bg-slate-900 text-slate-200 p-3 rounded-lg font-mono text-[11px] relative flex items-center justify-between group">
+              <span className="break-all select-all">
+                {`<script src="${mobileServerUrl.trim()}/widget.js" async></script>`}
+              </span>
+              <button
+                onClick={() => copyToClipboard(`<script src="${mobileServerUrl.trim()}/widget.js" async></script>`, 'widget_tag')}
+                className="ml-2 p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors shrink-0 cursor-pointer"
+                title="Copiar tag do widget"
+              >
+                {copiedKey === 'widget_tag' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              </button>
             </div>
           </div>
         </div>

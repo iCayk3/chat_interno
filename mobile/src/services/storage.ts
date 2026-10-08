@@ -143,4 +143,31 @@ export const storage = {
       return [];
     }
   },
+
+  // Gerenciamento dinâmico da base/servidor de conexão
+  async getServerUrl(): Promise<string | null> {
+    try {
+      return await AsyncStorage.getItem('@chat_server_base_url');
+    } catch {
+      return null;
+    }
+  },
+
+  async getServerCompanyName(): Promise<string | null> {
+    try {
+      return await AsyncStorage.getItem('@chat_server_company_name');
+    } catch {
+      return null;
+    }
+  },
+
+  async saveServerUrl(url: string, companyName?: string): Promise<void> {
+    const { chatSocket } = await import('./chatSocket');
+    await chatSocket.setServerUrl(url, companyName);
+  },
+
+  async clearServerUrl(): Promise<void> {
+    const { chatSocket } = await import('./chatSocket');
+    await chatSocket.clearServerUrl();
+  },
 };

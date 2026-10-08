@@ -48,6 +48,7 @@ class ChatSocketService {
   private notificationListeners: NotificationHandler[] = [];
   private reconnectTimer: any = null;
   private outboxQueue: string[] = []; // Fila de envio garantido para mensagens nunca se perderem
+  private notifiedMessageIds: Map<string, number> = new Map();
 
   public getConnected(): boolean {
     return this.isConnected;
@@ -123,16 +124,25 @@ class ChatSocketService {
               this.notifyMessage(data.payload);
               // Notifica nativamente com som e banner caso o operador responda com o app minimizado
               if (data.payload.senderType === 'operator' && AppState.currentState !== 'active') {
-                notificationService.showNativeNotification(
-                  `Atendente: ${data.payload.senderName || 'Suporte SOL'}`,
-                  data.payload.content || 'Nova mensagem no atendimento',
-                  {
-                    type: 'chat_message',
-                    conversationId: data.payload.conversationId,
-                    senderName: data.payload.senderName,
-                  },
-                  'sol-chat'
-                ).catch(() => {});
+                const msgId = data.payload.id || `${data.payload.conversationId}-${data.payload.timestamp}`;
+                const now = Date.now();
+                for (const [k, ts] of this.notifiedMessageIds.entries()) {
+                  if (now - ts > 30000) this.notifiedMessageIds.delete(k);
+                }
+                if (!this.notifiedMessageIds.has(msgId)) {
+                  this.notifiedMessageIds.set(msgId, now);
+                  notificationService.showNativeNotification(
+                    `Atendente: ${data.payload.senderName || 'Suporte SOL'}`,
+                    data.payload.content || 'Nova mensagem no atendimento',
+                    {
+                      id: msgId,
+                      type: 'chat_message',
+                      conversationId: data.payload.conversationId,
+                      senderName: data.payload.senderName,
+                    },
+                    'sol-chat'
+                  ).catch(() => {});
+                }
               }
             } else if (data.type === 'typing' && data.payload) {
               this.notifyTyping(data.payload.isTyping, data.payload.senderName || 'Operador');

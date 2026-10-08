@@ -30,6 +30,9 @@ export interface NotificationPayload {
   [key: string]: any;
 }
 
+// Cache em memória para prevenir notificações duplicadas em rajada (anti-duplicação)
+const recentMobileNotifs = new Map<string, number>();
+
 export const notificationService = {
   /**
    * Inicializa os canais de notificação no Android e pede permissões no iOS/Android
@@ -169,11 +172,30 @@ export const notificationService = {
     try {
       if (Platform.OS === 'web') return;
 
+      const notifKey = data.id
+        ? `msg-${data.id}`
+        : data.conversationId
+        ? `chat-${data.conversationId}`
+        : `title-${title}`;
+
+      const now = Date.now();
+      // Remove entradas antigas (> 20s)
+      for (const [k, ts] of recentMobileNotifs.entries()) {
+        if (now - ts > 20000) recentMobileNotifs.delete(k);
+      }
+
+      if (recentMobileNotifs.has(notifKey)) {
+        console.log('[NOTIF] Notificação nativa duplicada ignorada:', notifKey);
+        return;
+      }
+      recentMobileNotifs.set(notifKey, now);
+
       const isExpoGo =
         Constants.appOwnership === 'expo' ||
         (Constants as any).executionEnvironment === 'storeClient';
 
       await Notifications.scheduleNotificationAsync({
+        identifier: notifKey,
         content: {
           title,
           body,
@@ -183,7 +205,7 @@ export const notificationService = {
         },
         trigger: !isExpoGo && channelId ? ({ channelId } as any) : null,
       });
-      console.log('[NOTIF] Notificação nativa disparada com sucesso:', title);
+      console.log('[NOTIF] Notificação nativa disparada com sucesso:', title, 'ID:', notifKey);
     } catch (e) {
       console.warn('[NOTIF] Falha ao agendar notificação nativa:', e);
     }
